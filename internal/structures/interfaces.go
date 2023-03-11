@@ -2,6 +2,7 @@ package structures
 
 type Comparator[V any] func(a V, b V) int
 
+// Sorted list/map that can be navigated easily
 type NavigableList[V any] interface {
 	// Returns the first value
 	First() *V
@@ -41,18 +42,35 @@ type NavigableList[V any] interface {
 
 	// Returns all the entry matching the value
 	Get(value V) Iterable[V]
+
+	// iterates through all the items
+	GetIterator() IteratorBase[V]
 }
 
-type TableRow struct{}
-
+// All data store manager struct should implement
+// these
 type AbstractTable interface {
 	NavigableList[TableRow]
 
-	Delete(k any)
+	// Checks if a key is in the tables range
+	// minKey <= key <= maxKey
+	IsInRange(key any) bool
 
-	Put(k any, v any)
+	// checks if an item is in the table
+	// usually uses memtable
+	EstimateExistance(key any) bool
 
-	IsInRange(k any)
+	// returns the size of the table
+	Size() int
+}
 
-	EstimateExistance(K any)
+// In memory memtable/buffer
+type Memtable interface {
+	AbstractTable
+
+	// Deletes an item from the table
+	Delete(key any)
+
+	// updates/adds something to the table
+	Put(key any, value any)
 }
