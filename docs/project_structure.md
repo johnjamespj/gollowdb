@@ -8,3 +8,8 @@
 * <code>/tests</code> : Sources for tests
 
 Source : https://github.com/golang-standards/project-layout
+
+## Repo
+
+* All the code updates that are pushed to <code>development</code> branch
+* All working releases will be pushed to <code>master</code> branch
