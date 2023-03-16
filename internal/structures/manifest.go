@@ -18,8 +18,8 @@ type Manifest struct {
 	walIdCounter        int64
 	version             int64
 	id                  string
-	sstables            SortedList[SSTableReferance]
-	walIds              SortedList[int]
+	sstables            *SortedList[*SSTableReferance]
+	walIds              *SortedList[int]
 	sstableUpdateStream *chan []SSTableUpdate
 	lastSnapshot        int64
 	mu                  sync.RWMutex
@@ -31,7 +31,7 @@ func OpenManifest(path string, id string, sstableUpdateStream *chan []SSTableUpd
 	var manifest Manifest
 	if _, err := os.Stat(filepath.Join(path, "MANIFEST")); errors.Is(err, os.ErrNotExist) {
 		// create a new manifest object
-		sstableList := make([]SSTableReferance, 0)
+		sstableList := make([]*SSTableReferance, 0)
 		walIds := make([]int, 0)
 
 		manifest = Manifest{
@@ -41,7 +41,7 @@ func OpenManifest(path string, id string, sstableUpdateStream *chan []SSTableUpd
 			walIdCounter:        0,
 			version:             0,
 			id:                  id,
-			sstables: NewSortedList(sstableList, func(a SSTableReferance, b SSTableReferance) int {
+			sstables: NewSortedList(sstableList, func(a *SSTableReferance, b *SSTableReferance) int {
 				c := a.level - b.level
 
 				if c == 0 {
@@ -92,7 +92,7 @@ func unpackManifest(reader io.Reader) (Manifest, error) {
 		walLen           int
 		walIds           []int
 		sstableLen       int
-		sstables         []SSTableReferance
+		sstables         []*SSTableReferance
 		err              error
 	)
 
@@ -140,7 +140,7 @@ func unpackManifest(reader io.Reader) (Manifest, error) {
 	}
 	sstableLen = sstableLen / 2
 
-	sstables = make([]SSTableReferance, sstableLen)
+	sstables = make([]*SSTableReferance, sstableLen)
 	for i := 0; i < sstableLen; i++ {
 		id, err := decoder.DecodeInt()
 		if err != nil {
@@ -152,7 +152,7 @@ func unpackManifest(reader io.Reader) (Manifest, error) {
 			return Manifest{}, err
 		}
 
-		sstables[i] = SSTableReferance{
+		sstables[i] = &SSTableReferance{
 			id:    id,
 			level: level,
 		}
@@ -165,7 +165,7 @@ func unpackManifest(reader io.Reader) (Manifest, error) {
 		sstableIdCounter: int64(sstableIdCounter),
 		walIdCounter:     int64(walIdCounter),
 		walIds:           NewSortedList(walIds, func(a int, b int) int { return a - b }),
-		sstables: NewSortedList(sstables, func(a SSTableReferance, b SSTableReferance) int {
+		sstables: NewSortedList(sstables, func(a *SSTableReferance, b *SSTableReferance) int {
 			c := a.level - b.level
 
 			if c == 0 {
@@ -242,7 +242,7 @@ func (m *Manifest) SetLastSnapshot(snapshot int64) {
 	m.lastSnapshot = snapshot
 }
 
-func (m *Manifest) AddTables(tables []SSTableReferance) {
+func (m *Manifest) AddTables(tables []*SSTableReferance) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -254,19 +254,19 @@ func (m *Manifest) AddTables(tables []SSTableReferance) {
 	m.sstables.AddAll(tables)
 }
 
-func (m *Manifest) AddTable(table SSTableReferance) {
+func (m *Manifest) AddTable(table *SSTableReferance) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	m.bufferedUpdate = append(m.bufferedUpdate, SSTableUpdate{
 		action: ADD,
-		tables: []SSTableReferance{table},
+		tables: []*SSTableReferance{table},
 	})
 
 	m.sstables.Add(table)
 }
 
-func (m *Manifest) GetAllTables() []SSTableReferance {
+func (m *Manifest) GetAllTables() []*SSTableReferance {
 	return m.sstables.list
 }
 
@@ -276,13 +276,13 @@ func (m *Manifest) RemoveTable(table SSTableReferance) {
 
 	m.bufferedUpdate = append(m.bufferedUpdate, SSTableUpdate{
 		action: REMOVE,
-		tables: []SSTableReferance{table},
+		tables: []*SSTableReferance{&table},
 	})
 
-	m.sstables.Remove(table)
+	m.sstables.Remove(&table)
 }
 
-func (m *Manifest) RemoveTables(tables []SSTableReferance) {
+func (m *Manifest) RemoveTables(tables []*SSTableReferance) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -314,14 +314,14 @@ func (m *Manifest) AddWalId(id int) {
 	m.walIds.Add(id)
 }
 
-func (m *Manifest) RemoveId(id int) {
+func (m *Manifest) RemoveWALId(id int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	m.walIds.Remove(id)
 }
 
-func (m *Manifest) RemoveIds(ids []int) {
+func (m *Manifest) RemoveWALIds(ids []int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -368,7 +368,11 @@ func (m *Manifest) Print() {
 
 	fmt.Println("SSTable Id Counter: ", m.sstableIdCounter)
 	fmt.Println("WAL Id Counter: ", m.walIdCounter)
-	fmt.Println("SSTable List: ", m.sstables.list)
+	fmt.Println("SSTable List: ")
+	for _, elm := range m.sstables.list {
+		fmt.Print(*elm)
+	}
+	fmt.Println()
 	fmt.Println("WAL List: ", m.walIds.list)
 }
 
@@ -404,5 +408,5 @@ const (
 
 type SSTableUpdate struct {
 	action int
-	tables []SSTableReferance
+	tables []*SSTableReferance
 }

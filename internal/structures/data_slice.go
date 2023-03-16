@@ -6,20 +6,20 @@ type DataSlice struct {
 }
 
 // Creates a new DataSlice
-func NewDataSlice(value any) DataSlice {
+func NewDataSlice(value any) *DataSlice {
 	// check if the value is a string
 	if str, ok := value.(string); ok {
-		return DataSlice{bin: []byte(str)}
+		return &DataSlice{bin: []byte(str)}
 	}
 
 	// check if the value is a byte array
 	if bin, ok := value.([]byte); ok {
-		return DataSlice{bin: bin}
+		return &DataSlice{bin: bin}
 	}
 
 	// check if the value is a DataSlice
 	if bin, ok := value.(DataSlice); ok {
-		return bin
+		return &bin
 	}
 
 	panic("invalid type")

@@ -30,7 +30,7 @@ func NewWALWriter(path string, id int64) WALWriter {
 }
 
 // Add an entry to the log
-func (v WALWriter) AddTableRow(row TableRow) {
+func (v WALWriter) AddTableRow(row *TableRow) {
 	row.PackRow(v.file)
 }
 
@@ -61,11 +61,11 @@ func NewWALReader(path string, id int) WALReader {
 }
 
 // read all entries in the log as an array of TableRow
-func (v WALReader) ReadAllRows() []TableRow {
+func (v WALReader) ReadAllRows() []*TableRow {
 	v.file.Seek(0, io.SeekStart)
 
 	reader := bufio.NewReader(v.file)
-	l := make([]TableRow, 0)
+	l := make([]*TableRow, 0)
 
 	for {
 		row, err := NewTableRowFrom(reader)

@@ -4,6 +4,9 @@ type Comparator[V any] func(a V, b V) int
 
 // Sorted list/map that can be navigated easily
 type NavigableList[V any] interface {
+	// Returns as a list
+	ToList() []V
+
 	// Returns the first value
 	First() *V
 
@@ -74,3 +77,8 @@ type Memtable interface {
 	// updates/adds something to the table
 	Put(key any, value any)
 }
+
+type noCopy struct{}
+
+func (*noCopy) Lock()   {}
+func (*noCopy) Unlock() {}

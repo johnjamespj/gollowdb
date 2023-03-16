@@ -13,11 +13,13 @@ type SortedList[V any] struct {
 	mu sync.RWMutex
 }
 
-func NewSortedList[V any](list []V, comparator Comparator[V]) SortedList[V] {
-	return SortedList[V]{
+func NewSortedList[V any](list []V, comparator Comparator[V]) *SortedList[V] {
+	sortedList := &SortedList[V]{
 		list:       list,
 		comparator: comparator,
 	}
+	sortedList.base = sortedList
+	return sortedList
 }
 
 // Add adds a value to the list efficiently
@@ -42,8 +44,38 @@ func (v *SortedList[V]) AddAll(values []V) {
 	})
 }
 
+func (v *SortedList[V]) Merge(other []V) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	// TODO: merge two sorted lists
+	newList := make([]V, 0)
+	i, j := 0, 0
+	for i < len(v.list) && j < len(other) {
+		if v.comparator(v.list[i], other[j]) < 0 {
+			newList = append(newList, v.list[i])
+			i++
+		} else {
+			newList = append(newList, other[j])
+			j++
+		}
+	}
+
+	for i < len(v.list) {
+		newList = append(newList, v.list[i])
+		i++
+	}
+
+	for j < len(other) {
+		newList = append(newList, other[j])
+		j++
+	}
+
+	v.list = newList
+}
+
 // Remove removes a value from the list efficiently
-func (v *SortedList[V]) Remove(value V) {
+func (v *SortedList[V]) Remove(value V) *V {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
@@ -52,12 +84,14 @@ func (v *SortedList[V]) Remove(value V) {
 	})
 
 	if i >= len(v.list) {
-		return
+		return nil
 	}
 
 	if v.comparator(v.list[i], value) == 0 {
 		v.list = append(v.list[:i], v.list[i+1:]...)
 	}
+
+	return &value
 }
 
 // Remove removes a value from the list efficiently
@@ -76,6 +110,18 @@ func (v *SortedList[V]) RemoveWhere(predicate func(V) bool) []V {
 	}
 
 	return removed
+}
+
+func (v *SortedList[V]) Clear() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.list = make([]V, 0)
+}
+
+func (v *SortedList[V]) ToList() []V {
+	ret := make([]V, len(v.list))
+	copy(ret, v.list)
+	return ret
 }
 
 // Returns the first value. O(1)

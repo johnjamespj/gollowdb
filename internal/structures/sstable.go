@@ -3,7 +3,6 @@ package structures
 import (
 	"bufio"
 	"bytes"
-	"container/list"
 	"fmt"
 	"io"
 	"os"
@@ -14,17 +13,18 @@ import (
 )
 
 type SSTableReader struct {
+	EnhancedIterator[*TableRow]
 	path         string
 	level        uint64
 	id           uint64
 	metadata     SSTableMetadata
 	file         *os.File
 	blocksOffset uint64
-	index        *SortedList[IndexRow]
-	comparator   Comparator[DataSlice]
+	index        *SortedList[*IndexRow]
+	comparator   Comparator[*DataSlice]
 }
 
-func NewSSTableReader(path string, level uint64, id uint64, comparator Comparator[DataSlice]) (SSTableReader, error) {
+func NewSSTableReader(path string, level uint64, id uint64, comparator Comparator[*DataSlice]) (SSTableReader, error) {
 	fd, err := os.OpenFile(filepath.Join(path, fmt.Sprintf("l%d_%d.sst", level, id)), os.O_RDWR, 0644)
 	if err != nil {
 		return SSTableReader{}, err
@@ -42,11 +42,11 @@ func NewSSTableReader(path string, level uint64, id uint64, comparator Comparato
 	}
 	offset = offset - int64(readerBuf.Buffered())
 
-	index := NewSortedList(meta.index, func(a IndexRow, b IndexRow) int {
+	index := NewSortedList(meta.index, func(a *IndexRow, b *IndexRow) int {
 		return comparator(a.key, b.key)
 	})
 
-	return SSTableReader{
+	reader := SSTableReader{
 		path:         path,
 		level:        level,
 		id:           id,
@@ -54,8 +54,11 @@ func NewSSTableReader(path string, level uint64, id uint64, comparator Comparato
 		file:         fd,
 		blocksOffset: uint64(offset),
 		comparator:   comparator,
-		index:        &index,
-	}, nil
+		index:        index,
+	}
+	reader.base = &reader
+
+	return reader, nil
 }
 
 func (i *SSTableReader) GetPath() string {
@@ -75,7 +78,7 @@ func (i *SSTableReader) GetMetadata() SSTableMetadata {
 }
 
 // Returns the first value
-func (i *SSTableReader) First() *TableRow {
+func (i *SSTableReader) First() **TableRow {
 	rows, err := i.GetBlock(0)
 	if err != nil {
 		panic(err)
@@ -85,7 +88,7 @@ func (i *SSTableReader) First() *TableRow {
 }
 
 // Returns the last value
-func (i *SSTableReader) Last() *TableRow {
+func (i *SSTableReader) Last() **TableRow {
 	rows, err := i.GetBlock(i.index.GetSize() - 1)
 	if err != nil {
 		panic(err)
@@ -98,16 +101,14 @@ func (i *SSTableReader) Last() *TableRow {
 // than or equal to the given key, or null if there is no such key.
 func (i *SSTableReader) Ceiling(k TableRow) *TableRow {
 	// get the block index
-	blockIdxRow := i.index.Floor(IndexRow{key: k.key})
+	blockIdxRow := *i.index.Floor(&IndexRow{key: k.key})
 	if blockIdxRow == nil {
 		return nil
 	}
 	blockIdx := blockIdxRow.idx
 
-	block, err := i.GetBlock(blockIdx)
-	if err != nil {
-		panic(err)
-	}
+	var block *SortedList[*TableRow]
+	var err error
 
 	// get first row from next block
 	for blockIdx < i.index.GetSize() {
@@ -117,9 +118,9 @@ func (i *SSTableReader) Ceiling(k TableRow) *TableRow {
 		}
 		blockIdx++
 
-		row := block.Ceiling(k)
+		row := block.Ceiling(&k)
 		if row != nil {
-			return row
+			return *row
 		}
 	}
 
@@ -131,16 +132,14 @@ func (i *SSTableReader) Ceiling(k TableRow) *TableRow {
 // no such key.
 func (i *SSTableReader) Higher(k TableRow) *TableRow {
 	// get the block index
-	blockIdxRow := i.index.Floor(IndexRow{key: k.key})
+	blockIdxRow := *i.index.Floor(&IndexRow{key: k.key})
 	if blockIdxRow == nil {
 		return nil
 	}
 	blockIdx := blockIdxRow.idx
 
-	block, err := i.GetBlock(blockIdx)
-	if err != nil {
-		panic(err)
-	}
+	var block *SortedList[*TableRow]
+	var err error
 
 	// get first row from next block
 	for blockIdx < i.index.GetSize() {
@@ -150,9 +149,9 @@ func (i *SSTableReader) Higher(k TableRow) *TableRow {
 		}
 		blockIdx++
 
-		row := block.Higher(k)
+		row := block.Higher(&k)
 		if row != nil {
-			return row
+			return *row
 		}
 	}
 
@@ -164,7 +163,7 @@ func (i *SSTableReader) Higher(k TableRow) *TableRow {
 // no such key.
 func (i *SSTableReader) Floor(k TableRow) *TableRow {
 	// get the block index
-	blockIdxRow := i.index.Floor(IndexRow{key: k.key})
+	blockIdxRow := *i.index.Floor(&IndexRow{key: k.key})
 	if blockIdxRow == nil {
 		return nil
 	}
@@ -176,7 +175,7 @@ func (i *SSTableReader) Floor(k TableRow) *TableRow {
 		panic(err)
 	}
 
-	return block.Floor(k)
+	return *block.Floor(&k)
 }
 
 // Returns a key-value mapping associated with the greatest key
@@ -184,7 +183,7 @@ func (i *SSTableReader) Floor(k TableRow) *TableRow {
 // key.
 func (i *SSTableReader) Lower(k TableRow) *TableRow {
 	// get the block index
-	blockIdxRow := i.index.Floor(IndexRow{key: k.key})
+	blockIdxRow := *i.index.Floor(&IndexRow{key: k.key})
 	if blockIdxRow == nil {
 		return nil
 	}
@@ -197,10 +196,10 @@ func (i *SSTableReader) Lower(k TableRow) *TableRow {
 			panic(err)
 		}
 		blockIdx--
-		row := block.Lower(k)
+		row := block.Lower(&k)
 
 		if row != nil {
-			return row
+			return *row
 		}
 	}
 
@@ -209,23 +208,23 @@ func (i *SSTableReader) Lower(k TableRow) *TableRow {
 
 // Returns a view of the portion of this map whose keys are
 // strictly less than fromKey. O(log n)
-func (i *SSTableReader) Head(fromKey TableRow, inclusive bool) Iterable[TableRow] {
+func (i *SSTableReader) Head(fromKey TableRow, inclusive bool) Iterable[*TableRow] {
 	block, err := i.GetBlock(0)
 	if err != nil {
 		panic(err)
 	}
 
-	itr := Iterable[TableRow]{
-		recreaterCallback: func() IteratorBase[TableRow] {
+	itr := Iterable[*TableRow]{
+		recreaterCallback: func() IteratorBase[*TableRow] {
 			return &SSTableIterator{
 				currentIterator:   block.GetIterator(),
 				currentBlockIndex: 0,
 				sstable:           i,
-				stopCallback: func(a *TableRow) bool {
+				stopCallback: func(a **TableRow) bool {
 					if inclusive {
-						return i.comparator(a.key, fromKey.key) > 0
+						return i.comparator((**a).key, fromKey.key) > 0
 					}
-					return i.comparator(a.key, fromKey.key) >= 0
+					return i.comparator((**a).key, fromKey.key) >= 0
 				},
 			}
 		},
@@ -237,23 +236,24 @@ func (i *SSTableReader) Head(fromKey TableRow, inclusive bool) Iterable[TableRow
 
 // Returns a view of the portion of this map whose keys are
 // greater than or equal to fromKey.
-func (i *SSTableReader) Tail(fromKey TableRow, inclusive bool) Iterable[TableRow] {
+func (i *SSTableReader) Tail(fromKey TableRow, inclusive bool) Iterable[*TableRow] {
 	// get the block index
-	blockIdx := i.index.Floor(IndexRow{key: fromKey.key}).idx
+	b := *i.index.Floor(&IndexRow{key: fromKey.key})
+	blockIdx := b.idx
 
 	block, err := i.GetBlock(blockIdx)
 	if err != nil {
 		panic(err)
 	}
 
-	itr := block.Tail(fromKey, inclusive)
-	itrReturn := Iterable[TableRow]{
-		recreaterCallback: func() IteratorBase[TableRow] {
+	itr := block.Tail(&fromKey, inclusive)
+	itrReturn := Iterable[*TableRow]{
+		recreaterCallback: func() IteratorBase[*TableRow] {
 			return &SSTableIterator{
 				currentIterator:   itr.GetIterator(),
 				currentBlockIndex: blockIdx,
 				sstable:           i,
-				stopCallback:      func(a *TableRow) bool { return false },
+				stopCallback:      func(a **TableRow) bool { return false },
 			}
 		},
 	}
@@ -264,9 +264,9 @@ func (i *SSTableReader) Tail(fromKey TableRow, inclusive bool) Iterable[TableRow
 
 // Returns a view of the portion of this map whose keys range
 // from fromKey, inclusive, to toKey, exclusive.
-func (i *SSTableReader) Sub(fromKey TableRow, toKey TableRow, fromInclusive bool, toInclusive bool) Iterable[TableRow] {
+func (i *SSTableReader) Sub(fromKey *TableRow, toKey *TableRow, fromInclusive bool, toInclusive bool) Iterable[*TableRow] {
 	// get the block index
-	blockIdxRow := i.index.Floor(IndexRow{key: fromKey.key})
+	blockIdxRow := *i.index.Floor(&IndexRow{key: fromKey.key})
 
 	blockIdx := 0
 	if blockIdxRow != nil {
@@ -279,17 +279,17 @@ func (i *SSTableReader) Sub(fromKey TableRow, toKey TableRow, fromInclusive bool
 	}
 
 	itr := block.Tail(fromKey, fromInclusive)
-	itrReturn := Iterable[TableRow]{
-		recreaterCallback: func() IteratorBase[TableRow] {
+	itrReturn := Iterable[*TableRow]{
+		recreaterCallback: func() IteratorBase[*TableRow] {
 			return &SSTableIterator{
 				currentIterator:   itr.GetIterator(),
 				currentBlockIndex: blockIdx,
 				sstable:           i,
-				stopCallback: func(a *TableRow) bool {
+				stopCallback: func(a **TableRow) bool {
 					if toInclusive {
-						return i.comparator(a.key, toKey.key) > 0
+						return i.comparator((**a).key, toKey.key) > 0
 					}
-					return i.comparator(a.key, toKey.key) >= 0
+					return i.comparator((**a).key, toKey.key) >= 0
 				},
 			}
 		},
@@ -300,14 +300,15 @@ func (i *SSTableReader) Sub(fromKey TableRow, toKey TableRow, fromInclusive bool
 }
 
 // Returns all the entry matching the value
-func (i *SSTableReader) Get(value TableRow) Iterable[TableRow] {
+func (i *SSTableReader) Get(value *TableRow) Iterable[*TableRow] {
 	return i.Sub(value, value, true, true)
 }
 
 // Checks if a key is in the tables range
 // minKey <= key <= maxKey
 func (i *SSTableReader) IsInRange(key any) bool {
-	return i.comparator(i.metadata.minKey, NewDataSlice(key)) <= 0 && i.comparator(i.metadata.maxKey, NewDataSlice(key)) >= 0
+	k := NewDataSlice(key)
+	return i.comparator(i.metadata.minKey, k) <= 0 && i.comparator(i.metadata.maxKey, k) >= 0
 }
 
 // EstimateExistance(key any)
@@ -324,7 +325,7 @@ func (i *SSTableReader) EstimateExistance(key any) bool {
 }
 
 // iterates through all the items
-func (i *SSTableReader) GetIterator() IteratorBase[TableRow] {
+func (i *SSTableReader) GetIterator() IteratorBase[*TableRow] {
 	block, err := i.GetBlock(0)
 	if err != nil {
 		panic(err)
@@ -334,7 +335,7 @@ func (i *SSTableReader) GetIterator() IteratorBase[TableRow] {
 		currentIterator:   block.GetIterator(),
 		currentBlockIndex: 0,
 		sstable:           i,
-		stopCallback:      func(a *TableRow) bool { return false },
+		stopCallback:      func(a **TableRow) bool { return false },
 	}
 }
 
@@ -343,14 +344,15 @@ func (i *SSTableReader) Close() error {
 	return i.file.Close()
 }
 
-func (i *SSTableReader) GetBlocksForRange(a DataSlice, b DataSlice) []int {
+func (i *SSTableReader) GetBlocksForRange(a *DataSlice, b *DataSlice) []int {
 	if i.comparator(a, b) == 0 {
+		floor := *i.index.Floor(&IndexRow{key: a})
 		return []int{
-			i.index.Floor(IndexRow{key: a}).idx,
+			floor.idx,
 		}
 	}
 
-	res := i.index.Sub(IndexRow{key: a}, IndexRow{key: b}, true, true)
+	res := i.index.Sub(&IndexRow{key: a}, &IndexRow{key: b}, true, true)
 	itr := res.GetIterator()
 	var blocks []int
 	for itr.MoveNext() {
@@ -359,7 +361,7 @@ func (i *SSTableReader) GetBlocksForRange(a DataSlice, b DataSlice) []int {
 	return blocks
 }
 
-func (i *SSTableReader) GetBlock(idx int) (SortedList[TableRow], error) {
+func (i *SSTableReader) GetBlock(idx int) (*SortedList[*TableRow], error) {
 	offset := i.metadata.index[idx].offset
 	size := 0
 
@@ -374,34 +376,25 @@ func (i *SSTableReader) GetBlock(idx int) (SortedList[TableRow], error) {
 	blockBytes := make([]byte, size)
 	_, err := i.file.Read(blockBytes)
 	if err != nil {
-		return SortedList[TableRow]{}, err
+		return &SortedList[*TableRow]{}, err
 	}
 
 	r, err := snappy.Decode([]byte{}, blockBytes)
 	if err != nil {
-		return SortedList[TableRow]{}, err
+		return &SortedList[*TableRow]{}, err
 	}
 
 	reader := bytes.NewReader(r)
-	list := list.New()
+	rows := make([]*TableRow, 0)
 	for {
 		row, err := NewTableRowFrom(reader)
 		if err != nil {
 			break
 		}
-		list.PushBack(row)
+		rows = append(rows, row)
 	}
 
-	items := make([]TableRow, list.Len())
-	cur := list.Front()
-	j := 0
-	for cur != nil {
-		items[j] = cur.Value.(TableRow)
-		cur = cur.Next()
-		j++
-	}
-
-	return NewSortedList(items, func(a TableRow, b TableRow) int {
+	return NewSortedList(rows, func(a *TableRow, b *TableRow) int {
 		return i.comparator(a.key, b.key)
 	}), nil
 }
@@ -485,7 +478,7 @@ func parseSSTableMetadata(reader io.Reader) (SSTableMetadata, error) {
 		return SSTableMetadata{}, err
 	}
 
-	idx := make([]IndexRow, idxSize/2)
+	idx := make([]*IndexRow, idxSize/2)
 	j := 0
 	for i := 0; i < idxSize; i += 2 {
 		keyBytes, err := decoder.DecodeBytes()
@@ -498,7 +491,7 @@ func parseSSTableMetadata(reader io.Reader) (SSTableMetadata, error) {
 		if err != nil {
 			return SSTableMetadata{}, err
 		}
-		idx[j] = IndexRow{
+		idx[j] = &IndexRow{
 			key:    key,
 			offset: offset,
 			idx:    j,
@@ -529,7 +522,7 @@ func parseSSTableMetadata(reader io.Reader) (SSTableMetadata, error) {
 		size:          uint64(size),
 		count:         uint64(count),
 		index:         idx,
-		filter: Bloomfilter{
+		filter: &Bloomfilter{
 			hashCount:     hashCount,
 			byteArray:     byteArray,
 			byteArraySize: len(byteArray),
@@ -539,10 +532,10 @@ func parseSSTableMetadata(reader io.Reader) (SSTableMetadata, error) {
 
 // Iterator for a sstable
 type SSTableIterator struct {
-	currentIterator   IteratorBase[TableRow]
+	currentIterator   IteratorBase[*TableRow]
 	currentBlockIndex int
 	sstable           *SSTableReader
-	stopCallback      StopCallback[TableRow]
+	stopCallback      StopCallback[*TableRow]
 }
 
 func (i *SSTableIterator) MoveNext() bool {
@@ -565,7 +558,7 @@ func (i *SSTableIterator) MoveNext() bool {
 	return !i.stopCallback(&row)
 }
 
-func (i *SSTableIterator) GetCurrent() TableRow {
+func (i *SSTableIterator) GetCurrent() *TableRow {
 	row := i.currentIterator.GetCurrent()
 	if i.stopCallback(&row) {
 		panic("Iterator: No more items left")

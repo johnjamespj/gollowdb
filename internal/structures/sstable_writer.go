@@ -13,16 +13,16 @@ import (
 )
 
 type IndexRow struct {
-	key    DataSlice
+	key    *DataSlice
 	offset int
 	idx    int
 }
 
 type SSTableMetadata struct {
-	filter        Bloomfilter
-	index         []IndexRow
-	minKey        DataSlice
-	maxKey        DataSlice
+	filter        *Bloomfilter
+	index         []*IndexRow
+	minKey        *DataSlice
+	maxKey        *DataSlice
 	minTimestamp  uint64
 	maxTimestamp  uint64
 	minSnapshotID uint64
@@ -58,12 +58,13 @@ func (i SSTableMetadata) PackSSTableMetadata(writer io.Writer) {
 	encoder.EncodeBytes(i.filter.byteArray)
 }
 
-func WriteSSTable(sorted NavigableList[TableRow], minBlockCount uint64, maxBlockSize uint64, path string, level uint64, id uint64) error {
+func WriteSSTable(sorted []*TableRow, minBlockCount uint64, maxBlockSize uint64, path string, level uint64, id uint64) error {
 	// extract the datapoints for the index
 	metadata := extractMetadata(sorted, minBlockCount, maxBlockSize)
-	blocks := extractBlocks(sorted.GetIterator(), metadata.blockCount, metadata.blockSize)
+	blocks := extractBlocks(sorted, metadata.blockCount, metadata.blockSize)
 
-	fd, err := os.OpenFile(filepath.Join(path, fmt.Sprintf("l%d_%d.sst", level, id)), os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
+	filename := filepath.Join(path, fmt.Sprintf("l%d_%d.sst", level, id))
+	fd, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE, 0644)
 	if err != nil {
 		return err
 	}
@@ -80,11 +81,10 @@ func WriteSSTable(sorted NavigableList[TableRow], minBlockCount uint64, maxBlock
 	return nil
 }
 
-func extractMetadata(sorted NavigableList[TableRow], minBlockCount uint64, maxBlockSize uint64) SSTableMetadata {
+func extractMetadata(sorted []*TableRow, minBlockCount uint64, maxBlockSize uint64) SSTableMetadata {
 	var (
-		cur           TableRow
-		minKey        DataSlice
-		maxKey        DataSlice
+		minKey        *DataSlice
+		maxKey        *DataSlice
 		minTimestamp  uint64
 		maxTimestamp  uint64
 		minSnapshotID uint64
@@ -95,14 +95,12 @@ func extractMetadata(sorted NavigableList[TableRow], minBlockCount uint64, maxBl
 		count         uint64
 	)
 
-	minKey = sorted.First().key
-	maxKey = sorted.Last().key
+	minKey = sorted[0].key
+	maxKey = sorted[len(sorted)-1].key
 	count = 0
 
 	// extract information about the list
-	itr := sorted.GetIterator()
-	for itr.MoveNext() {
-		cur = itr.GetCurrent()
+	for _, cur := range sorted {
 		count++
 
 		if cur.timestamp < minTimestamp {
@@ -142,34 +140,29 @@ func extractMetadata(sorted NavigableList[TableRow], minBlockCount uint64, maxBl
 	}
 }
 
-func buildFilter(sorted NavigableList[TableRow], size uint64) Bloomfilter {
+func buildFilter(sorted []*TableRow, size uint64) *Bloomfilter {
 	filter := NewBloomfilter(int(size), 10)
 
-	itr := sorted.GetIterator()
-	for itr.MoveNext() {
-		filter.Add(itr.GetCurrent().key)
+	for _, cur := range sorted {
+		filter.Add(cur.key)
 	}
 
 	return filter
 }
 
-func extractBlocks(itr IteratorBase[TableRow], blockCount uint64, blockSize uint64) [][]TableRow {
-	var cur TableRow
-
-	blocks := make([][]TableRow, 0)
+func extractBlocks(itr []*TableRow, blockCount uint64, blockSize uint64) [][]*TableRow {
+	blocks := make([][]*TableRow, 0)
 	var accumlateSize uint64 = 0
 
-	temp := make([]TableRow, 0)
+	temp := make([]*TableRow, 0)
 	i := 0
 
-	for itr.MoveNext() {
-		cur = itr.GetCurrent()
-
+	for _, cur := range itr {
 		if accumlateSize >= blockSize {
 			blocks = append(blocks, temp)
 			i++
 			accumlateSize = 0
-			temp = make([]TableRow, 0)
+			temp = make([]*TableRow, 0)
 		}
 
 		accumlateSize += uint64(8*4 + cur.key.GetSize() + cur.value.GetSize())
@@ -183,8 +176,8 @@ func extractBlocks(itr IteratorBase[TableRow], blockCount uint64, blockSize uint
 	return blocks
 }
 
-func packBlocks(blocks [][]TableRow) ([]byte, []IndexRow) {
-	idx := make([]IndexRow, len(blocks))
+func packBlocks(blocks [][]*TableRow) ([]byte, []*IndexRow) {
+	idx := make([]*IndexRow, len(blocks))
 
 	bufTotal := bytes.NewBuffer([]byte{})
 	for j := 0; j < len(blocks); j++ {
@@ -192,7 +185,7 @@ func packBlocks(blocks [][]TableRow) ([]byte, []IndexRow) {
 		for i := 0; i < len(blocks[j]); i++ {
 			blocks[j][i].PackRow(buf)
 		}
-		idx[j] = IndexRow{
+		idx[j] = &IndexRow{
 			key:    blocks[j][0].key,
 			offset: bufTotal.Len(),
 		}

@@ -2,27 +2,28 @@ package structures
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 )
 
 type DBOption struct {
+	noCopy                 noCopy
 	path                   string
 	id                     string
 	createIfNotExists      bool
 	maxInmemoryWriteBuffer int
-	comparator             Comparator[DataSlice]
+	comparator             Comparator[*DataSlice]
 }
 
-func NewDBOption() DBOption {
-	return DBOption{
+func NewDBOption() *DBOption {
+	return &DBOption{
 		path:                   ".",
 		maxInmemoryWriteBuffer: 10 * 1000 * 1000,
 		createIfNotExists:      false,
-		comparator: func(a, b DataSlice) int {
+		comparator: func(a, b *DataSlice) int {
 			return strings.Compare(string(a.String()), string(b.String()))
 		},
 	}
@@ -44,22 +45,24 @@ func (i *DBOption) SetShouldNotCreateIfNotExists() {
 	i.createIfNotExists = false
 }
 
-func (i *DBOption) SetComparator(comparator Comparator[DataSlice]) {
+func (i *DBOption) SetComparator(comparator Comparator[*DataSlice]) {
 	i.comparator = comparator
 }
 
 type DB struct {
-	option              DBOption
-	manifest            *Manifest
-	sstableManager      *SSTableManager
-	currentWALID        int64
-	currentMemtable     *SkipListMemtable
-	immutablesMemtable  []*NavigableList[TableRow]
-	sstableUpdateStream chan []SSTableUpdate
-	mu                  sync.RWMutex
+	option               *DBOption
+	manifest             *Manifest
+	sstableManager       *SSTableManager
+	currentWALID         int64
+	currentMemtable      *SkipListMemtable
+	immutablesMemtable   []*NavigableList[*TableRow]
+	memtableUpdateStream *chan bool
+	sstableUpdateStream  *chan []SSTableUpdate
+	mu                   sync.RWMutex
+	waitGroup            sync.WaitGroup
 }
 
-func NewDB(option DBOption) *DB {
+func NewDB(option *DBOption) *DB {
 	var lastSnapshotId uint64
 
 	// check if the folder exists
@@ -75,7 +78,6 @@ func NewDB(option DBOption) *DB {
 	}
 
 	sstableUpdateStream := make(chan []SSTableUpdate)
-	sstableManager := NewSSTableManager(option.path, option.comparator, &sstableUpdateStream)
 	manifest := OpenManifest(option.path, option.id, &sstableUpdateStream)
 
 	currentWALID := manifest.GetNextWALID()
@@ -85,44 +87,36 @@ func NewDB(option DBOption) *DB {
 
 	lastSnapshotId = uint64(manifest.GetLastSnapshot())
 
-	if manifest.sstables.GetSize() > 0 {
-		sstableUpdateStream <- []SSTableUpdate{
-			{
-				action: ADD,
-				tables: manifest.GetAllTables(),
-			},
-		}
-	}
-
-	cmp := func(a TableRow, b TableRow) int {
+	cmp := func(a *TableRow, b *TableRow) int {
 		return option.comparator(a.key, b.key)
 	}
 
+	memtableUpdateStream := make(chan bool, 100)
 	db := &DB{
-		sstableUpdateStream: sstableUpdateStream,
-		sstableManager:      sstableManager,
-		option:              option,
-		manifest:            manifest,
-		currentWALID:        currentWALID,
-		currentMemtable:     memtable,
+		sstableUpdateStream:  &sstableUpdateStream,
+		option:               option,
+		manifest:             manifest,
+		currentWALID:         currentWALID,
+		currentMemtable:      memtable,
+		memtableUpdateStream: &memtableUpdateStream,
 	}
 
+	db.sstableManager = NewSSTableManager(option.path, option.comparator, &sstableUpdateStream, manifest, cmp, &db.waitGroup)
+	db.sstableManager.AddAllSSTables(manifest.GetAllTables())
+
 	// load all WALs
-	immutableTables := make([]*NavigableList[TableRow], 0)
+	immutableTable := NewSortedList(make([]*TableRow, 0), cmp)
 	walIds := manifest.GetAllWALIds()
 	for _, id := range walIds {
 		if id != int(db.currentWALID) {
 			walReader := NewWALReader(option.path, id)
 			rows := walReader.ReadAllRows()
-			SortTableRow(&rows)
-			list := NewSortedList(rows, cmp)
 
 			if len(rows) > 0 {
-				var table NavigableList[TableRow] = &list
-				immutableTables = append(immutableTables, &table)
-				go db.flushMemtable(&table, id)
-			} else {
-				manifest.RemoveId(id)
+				SortTableRow(&rows)
+				immutableTable.Merge(rows)
+			} else if len(rows) == 0 {
+				manifest.RemoveWALId(id)
 				manifest.Commit()
 				DeleteWAL(option.path, id)
 			}
@@ -136,20 +130,26 @@ func NewDB(option DBOption) *DB {
 		}
 	}
 
-	manifest.Print()
-
 	db.currentMemtable.snapshotIdCounter = int64(lastSnapshotId)
-	db.immutablesMemtable = immutableTables
+	if immutableTable.GetSize() > 0 {
+		var ptr NavigableList[*TableRow] = immutableTable
+		db.immutablesMemtable = []*NavigableList[*TableRow]{&ptr}
+	}
+
+	// start background memtable flush
+	go db.memtableFlushLoop(&memtableUpdateStream, &db.waitGroup)
+
 	return db
+}
+
+func (i *DB) GetManager() *SSTableManager {
+	return i.sstableManager
 }
 
 func (i *DB) Put(key any, value any) {
 	i.mu.Lock()
 	if i.currentMemtable.GetSize() >= i.option.maxInmemoryWriteBuffer {
-		var table NavigableList[TableRow] = i.currentMemtable.table
-		go i.flushMemtable(&table, int(i.currentWALID))
-
-		var navList NavigableList[TableRow] = i.currentMemtable.table
+		var navList NavigableList[*TableRow] = i.currentMemtable.table
 		i.immutablesMemtable = append(i.immutablesMemtable, &navList)
 
 		lastSnapshotId := i.currentMemtable.snapshotIdCounter
@@ -161,6 +161,9 @@ func (i *DB) Put(key any, value any) {
 		i.manifest.AddWalId(int(currentWALID))
 		i.manifest.SetLastSnapshot(i.currentMemtable.snapshotIdCounter)
 		i.manifest.Commit()
+
+		// let background flush know
+		*i.memtableUpdateStream <- true
 	}
 	i.mu.Unlock()
 
@@ -177,6 +180,8 @@ func (i *DB) Delete(key any) {
 func (i *DB) Get(key any) *DataSlice {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
+	i.sstableManager.mu.RLock()
+	defer i.sstableManager.mu.RUnlock()
 
 	// Look in memtable
 	list := i.currentMemtable.Get(key).ToList()
@@ -189,13 +194,13 @@ func (i *DB) Get(key any) *DataSlice {
 		}
 
 		if item.GetRowType() == int(PUT) {
-			return &val
+			return val
 		}
 	}
 
-	// Look in immutable table
+	// Look in immutable memtables
 	for _, tables := range i.immutablesMemtable {
-		list = (*tables).Get(TableRow{key: NewDataSlice(key)}).ToList()
+		list = (*tables).Get(&TableRow{key: NewDataSlice(key)}).ToList()
 		for i := len(list) - 1; i >= 0; i-- {
 			item := list[i]
 			val := item.GetValue()
@@ -205,77 +210,125 @@ func (i *DB) Get(key any) *DataSlice {
 			}
 
 			if item.GetRowType() == int(PUT) {
-				return &val
+				return val
 			}
 		}
 	}
+
+	// read locks sstable manager
+	i.sstableManager.mu.RLock()
+	defer i.sstableManager.mu.RUnlock()
 
 	// Look in sstable files
-	readers := i.sstableManager.PlanSSTableQueryStrategy(NewDataSlice(key))
+	keySlice := NewDataSlice(key)
+	for j := 0; j < i.sstableManager.LayerCount(); j++ {
+		tables := i.sstableManager.PlanSSTableQueryStrategy(keySlice, j)
 
-	// look at level 0
-	list = make([]TableRow, 0)
-	j := 0
-	for ; j < len(readers); j++ {
-		reader := readers[j]
-		if reader.level != 0 {
-			break
-		}
-		list = append(list, reader.Get(TableRow{key: NewDataSlice(key)}).ToList()...)
-	}
-
-	sort.Slice(list, func(i, j int) bool {
-		return list[i].snapshotId < list[j].snapshotId
-	})
-
-	for i := len(list) - 1; i >= 0; i-- {
-		item := list[i]
-		val := item.GetValue()
-
-		if item.GetRowType() == int(DELETE) {
-			return nil
+		rows := make([]*TableRow, 0)
+		for _, table := range tables {
+			rows = append(rows, table.Get(&TableRow{
+				key: keySlice,
+			}).ToList()...)
 		}
 
-		if item.GetRowType() == int(PUT) {
-			return &val
-		}
-	}
-
-	// look at other level
-	list = make([]TableRow, 0)
-	for ; j < len(readers); j++ {
-		reader := readers[j]
-		list = reader.Get(TableRow{key: NewDataSlice(key)}).ToList()
-
-		for i := len(list) - 1; i >= 0; i-- {
-			item := list[i]
-			val := item.GetValue()
-
-			if item.GetRowType() == int(DELETE) {
+		if len(rows) != 0 {
+			row := rows[len(rows)-1]
+			if row.rowType == DELETE {
 				return nil
 			}
-
-			if item.GetRowType() == int(PUT) {
-				return &val
-			}
+			return row.value
 		}
 	}
 
 	return nil
 }
 
-func (i *DB) flushMemtable(table *NavigableList[TableRow], walId int) {
-	id := uint64(i.manifest.GetNextSSTableID())
-	err := WriteSSTable(*table, 10, 1000*1000, i.option.path, 0, id)
-	if err != nil {
-		panic(err)
-	}
-	i.manifest.AddTable(SSTableReferance{
-		level: 0,
-		id:    int(id),
-	})
+func (i *DB) Compact() {
+	*i.sstableManager.lsmUpdateStream <- true
+}
 
-	i.manifest.RemoveId(walId)
-	i.manifest.Commit()
-	DeleteWAL(i.option.path, walId)
+func (i *DB) Close() {
+	*i.memtableUpdateStream <- true
+	*i.memtableUpdateStream <- false
+	*i.sstableManager.lsmUpdateStream <- true
+	*i.sstableManager.lsmUpdateStream <- false
+	i.waitGroup.Wait()
+}
+
+func (i *DB) memtableFlushLoop(memtableUpdateStream *chan bool, waitGroup *sync.WaitGroup) {
+	fmt.Println("Started Memtable flush task ...")
+	waitGroup.Add(1)
+	for {
+		val := <-*memtableUpdateStream
+		if !val {
+			waitGroup.Done()
+			return
+		}
+
+		i.mu.RLock()
+		imm := make([]*NavigableList[*TableRow], len(i.immutablesMemtable))
+		copy(imm, i.immutablesMemtable)
+		list := i.manifest.GetAllWALIds()
+		curr := int(i.currentWALID)
+		i.mu.RUnlock()
+
+		// filter current wal
+		walsToRemove := make([]int, 0)
+		for _, id := range list {
+			if curr != id {
+				walsToRemove = append(walsToRemove, id)
+			}
+		}
+
+		// Skip flushing if no
+		if len(imm) == 0 {
+			continue
+		}
+
+		fmt.Printf("Started flushing %d memtables\n", len(imm))
+
+		// save memtables to file
+		sortedRows := NewSortedList(make([]*TableRow, 0), i.currentMemtable.table.comparator)
+		for _, table := range imm {
+			sortedRows.Merge((*table).ToList())
+		}
+
+		if len(sortedRows.list) == 0 {
+			i.manifest.RemoveWALIds(walsToRemove)
+			i.manifest.Commit()
+			continue
+		}
+
+		newSSTableId := i.manifest.GetNextSSTableID()
+		WriteSSTable(sortedRows.list, 1, 10*1000, i.option.path, 0, uint64(newSSTableId))
+
+		// commit changes to manifest
+		i.manifest.AddTable(&SSTableReferance{
+			level: 0,
+			id:    int(newSSTableId),
+		})
+		i.manifest.RemoveWALIds(walsToRemove)
+		i.manifest.Commit()
+
+		// delete all WAL
+		for _, id := range walsToRemove {
+			DeleteWAL(i.option.path, id)
+		}
+
+		// remove memtable from array
+		i.mu.Lock()
+
+		// remove common address in i.immutablesMemtable and imm
+		for _, table := range imm {
+			for j, t := range i.immutablesMemtable {
+				if t == table {
+					i.immutablesMemtable = append(i.immutablesMemtable[:j], i.immutablesMemtable[j+1:]...)
+					break
+				}
+			}
+		}
+		i.mu.Unlock()
+
+		fmt.Println("Commited flush...")
+	}
 }
