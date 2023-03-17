@@ -6,53 +6,11 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 )
-
-type DBOption struct {
-	logger                 *log.Logger
-	noCopy                 noCopy
-	path                   string
-	id                     *string
-	createIfNotExists      bool
-	maxInmemoryWriteBuffer int
-	comparator             Comparator[*DataSlice]
-}
-
-func NewDBOption() *DBOption {
-	return &DBOption{
-		path:                   "data",
-		maxInmemoryWriteBuffer: 10 * 1000 * 1000,
-		createIfNotExists:      false,
-		comparator: func(a, b *DataSlice) int {
-			return strings.Compare(string(a.String()), string(b.String()))
-		},
-	}
-}
-
-func (i *DBOption) SetPath(newPath string) {
-	i.path = newPath
-}
-
-func (i *DBOption) SetMaxInmemoryWriteBuffer(newSize int) {
-	i.maxInmemoryWriteBuffer = newSize
-}
-
-func (i *DBOption) SetShouldCreateIfNotExists() {
-	i.createIfNotExists = true
-}
-
-func (i *DBOption) SetShouldNotCreateIfNotExists() {
-	i.createIfNotExists = false
-}
-
-func (i *DBOption) SetComparator(comparator Comparator[*DataSlice]) {
-	i.comparator = comparator
-}
 
 type DB struct {
 	logger               *log.Logger
@@ -127,7 +85,7 @@ func NewDB(option *DBOption) *DB {
 		db.logger = log.New(file, fmt.Sprintf("[%s] ", *option.id), log.LstdFlags)
 	}
 
-	db.sstableManager = NewSSTableManager(option.path, option.comparator, manifest, cmp, &db.waitGroup, db.logger)
+	db.sstableManager = NewSSTableManager(option, manifest, cmp, &db.waitGroup, db.logger)
 	db.sstableManager.AddAllSSTables(manifest.GetAllTables())
 	db.manifest.sstableManager = db.sstableManager
 

@@ -24,16 +24,13 @@ type Compactor struct {
 	compactionStream *chan bool
 }
 
-func NewCompactor(lsmUpdateStream *chan bool, sstableManager *SSTableManager, manifest *Manifest, comparator Comparator[*TableRow], wg *sync.WaitGroup, log *log.Logger) *Compactor {
+func NewCompactor(options *DBOption, lsmUpdateStream *chan bool, sstableManager *SSTableManager, manifest *Manifest, comparator Comparator[*TableRow], wg *sync.WaitGroup, log *log.Logger) *Compactor {
 	cmp := func(a *LSMLevel, b *LSMLevel) int {
 		return int((a.score - b.score) * 1000)
 	}
 
 	var strategy CompactionStrategy = &LeveledCompaction{
-		maxLevelZeroFileCount: 3,
-		maxBaseLevelSize:      3 * 5 * 1000 * 1000,
-		levelFactor:           2,
-		sstableFileSize:       5 * 1000 * 1000,
+		options: options.lsmOptions,
 	}
 
 	compactionStream := make(chan bool)
@@ -382,10 +379,7 @@ type CompactionStrategy interface {
 }
 
 type LeveledCompaction struct {
-	maxBaseLevelSize      int
-	levelFactor           int
-	maxLevelZeroFileCount int
-	sstableFileSize       int
+	options LSMOptions
 }
 
 func (i *LeveledCompaction) CalculateScore(lsm []*LSMLevel, level int) float64 {
@@ -394,7 +388,7 @@ func (i *LeveledCompaction) CalculateScore(lsm []*LSMLevel, level int) float64 {
 	}
 
 	if level == 0 {
-		return float64(lsm[0].fileCount) / float64(i.maxLevelZeroFileCount)
+		return float64(lsm[0].fileCount) / float64(i.options.maxLevelZeroFileCount)
 	} else {
 		return float64(lsm[level].levelSize) / float64(i.CalculateLevelTargetSize(level))
 	}
@@ -405,7 +399,7 @@ func (i *LeveledCompaction) CalculateDelta(lsm []*LSMLevel, level int) int {
 		return 0
 	}
 
-	if level == 0 && lsm[0].fileCount <= i.maxLevelZeroFileCount {
+	if level == 0 && lsm[0].fileCount <= i.options.maxLevelZeroFileCount {
 		return 0
 	}
 
@@ -413,12 +407,12 @@ func (i *LeveledCompaction) CalculateDelta(lsm []*LSMLevel, level int) int {
 }
 
 func (i *LeveledCompaction) PartitionSize(lsm []*LSMLevel, level int) int {
-	return i.sstableFileSize
+	return i.options.sstableFileSize
 }
 
 func (i *LeveledCompaction) CalculateLevelTargetSize(level int) int {
 	if level < 1 {
 		return 0
 	}
-	return i.maxBaseLevelSize * int(math.Pow(float64(i.levelFactor), float64(level-1)))
+	return i.options.maxBaseLevelSize * int(math.Pow(float64(i.options.levelFactor), float64(level-1)))
 }

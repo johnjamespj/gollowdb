@@ -33,11 +33,11 @@ type SSTableManager struct {
 	lsmUpdateStream *chan bool
 }
 
-func NewSSTableManager(path string, comparator Comparator[*DataSlice], manifest *Manifest, rowComparator Comparator[*TableRow], wg *sync.WaitGroup, log *log.Logger) *SSTableManager {
+func NewSSTableManager(options *DBOption, manifest *Manifest, rowComparator Comparator[*TableRow], wg *sync.WaitGroup, log *log.Logger) *SSTableManager {
 	cmp := func(a *SSTableReaderRef, b *SSTableReaderRef) int {
 		c := a.level - b.level
 		if c == 0 {
-			return comparator(a.minKey, b.minKey)
+			return options.comparator(a.minKey, b.minKey)
 		}
 		return c
 	}
@@ -45,12 +45,12 @@ func NewSSTableManager(path string, comparator Comparator[*DataSlice], manifest 
 	lsmUpdateStream := make(chan bool, 100)
 	manager := &SSTableManager{
 		sstable:         NewSortedList(make([]*SSTableReaderRef, 0), cmp),
-		comparator:      comparator,
-		path:            path,
+		comparator:      options.comparator,
+		path:            options.path,
 		lsm:             make([]*LSMLevel, 0),
 		lsmUpdateStream: &lsmUpdateStream,
 	}
-	manager.compactor = NewCompactor(&lsmUpdateStream, manager, manifest, rowComparator, wg, log)
+	manager.compactor = NewCompactor(options, &lsmUpdateStream, manager, manifest, rowComparator, wg, log)
 
 	return manager
 }
