@@ -2,6 +2,7 @@ package structures
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -32,7 +33,7 @@ type SSTableManager struct {
 	lsmUpdateStream *chan bool
 }
 
-func NewSSTableManager(path string, comparator Comparator[*DataSlice], manifest *Manifest, rowComparator Comparator[*TableRow], wg *sync.WaitGroup) *SSTableManager {
+func NewSSTableManager(path string, comparator Comparator[*DataSlice], manifest *Manifest, rowComparator Comparator[*TableRow], wg *sync.WaitGroup, log *log.Logger) *SSTableManager {
 	cmp := func(a *SSTableReaderRef, b *SSTableReaderRef) int {
 		c := a.level - b.level
 		if c == 0 {
@@ -49,7 +50,7 @@ func NewSSTableManager(path string, comparator Comparator[*DataSlice], manifest 
 		lsm:             make([]*LSMLevel, 0),
 		lsmUpdateStream: &lsmUpdateStream,
 	}
-	manager.compactor = NewCompactor(&lsmUpdateStream, manager, manifest, rowComparator, wg)
+	manager.compactor = NewCompactor(&lsmUpdateStream, manager, manifest, rowComparator, wg, log)
 
 	return manager
 }

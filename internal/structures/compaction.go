@@ -1,13 +1,15 @@
 package structures
 
 import (
-	"fmt"
+	"log"
 	"math"
 	"sort"
 	"sync"
+	"time"
 )
 
 type Compactor struct {
+	logger          *log.Logger
 	manifest        *Manifest
 	sstableManager  *SSTableManager
 	taskQueue       *SortedList[*LSMLevel]
@@ -22,7 +24,7 @@ type Compactor struct {
 	compactionStream *chan bool
 }
 
-func NewCompactor(lsmUpdateStream *chan bool, sstableManager *SSTableManager, manifest *Manifest, comparator Comparator[*TableRow], wg *sync.WaitGroup) *Compactor {
+func NewCompactor(lsmUpdateStream *chan bool, sstableManager *SSTableManager, manifest *Manifest, comparator Comparator[*TableRow], wg *sync.WaitGroup, log *log.Logger) *Compactor {
 	cmp := func(a *LSMLevel, b *LSMLevel) int {
 		return int((a.score - b.score) * 1000)
 	}
@@ -38,6 +40,7 @@ func NewCompactor(lsmUpdateStream *chan bool, sstableManager *SSTableManager, ma
 	levelZeroStream := make(chan bool)
 
 	compactor := &Compactor{
+		logger:           log,
 		taskQueue:        NewSortedList(make([]*LSMLevel, 0), cmp),
 		lsmUpdateStream:  lsmUpdateStream,
 		sstableManager:   sstableManager,
@@ -112,12 +115,10 @@ func (i *Compactor) RunCompactor() {
 		i.CalculateScore()
 		tasks := i.CreateTaskList()
 
-		fmt.Println("Compaction started")
 		i.levelZero.Lock()
 
 		if len(tasks) == 0 {
 			i.levelZero.Unlock()
-			fmt.Println("Compaction cancelled")
 			continue
 		}
 
@@ -128,7 +129,6 @@ func (i *Compactor) RunCompactor() {
 
 		if score <= 1 || lvl == 0 {
 			i.levelZero.Unlock()
-			fmt.Println("Compaction cancelled")
 			continue
 		}
 
@@ -136,16 +136,25 @@ func (i *Compactor) RunCompactor() {
 
 		if delta >= len(lvlFiles) {
 			i.levelZero.Unlock()
-			fmt.Println("Compaction cancelled")
 			continue
 		}
 
+		startTime := time.Now().UnixNano()
+
 		lvlFiles = lvlFiles[:delta]
+
+		// ids of files from lvl
+		fromFilesIds := make([]int, 0)
+		for _, f := range lvlFiles {
+			fromFilesIds = append(fromFilesIds, int(f.id))
+		}
 
 		minKey := lvlFiles[0].minKey
 		maxKey := lvlFiles[len(lvlFiles)-1].maxKey
 
 		readers := i.sstableManager.FilesInRangeInLayer(minKey, maxKey, lvl+1)
+		// ids of files from lvl+1
+		toFilesIds := make([]int, 0)
 		for _, reader := range readers {
 			lvlFiles = append(lvlFiles, &SSTableReaderRef{
 				minKey: reader.metadata.minKey,
@@ -154,10 +163,17 @@ func (i *Compactor) RunCompactor() {
 				level:  int(reader.level),
 				id:     int(reader.id),
 			})
+			toFilesIds = append(toFilesIds, int(reader.id))
 		}
 
 		row := i.SSTableLoader(lvlFiles)
-		i.SplitAndSave(row, i.strategy.PartitionSize(i.sstableManager.lsm, lvl), lvl+1)
+		refs := i.SplitAndSave(row, i.strategy.PartitionSize(i.sstableManager.lsm, lvl), lvl+1)
+
+		// new files
+		newFilesIds := make([]int, 0)
+		for _, ref := range refs {
+			newFilesIds = append(newFilesIds, ref.id)
+		}
 
 		// request file removal
 		sstableRefs := make([]*SSTableReferance, 0)
@@ -169,8 +185,17 @@ func (i *Compactor) RunCompactor() {
 		}
 		i.manifest.RemoveTables(sstableRefs)
 		i.manifest.Commit()
-		fmt.Println("Compaction finished")
 		i.levelZero.Unlock()
+
+		i.logger.Printf(
+			"LevelNCompaction(L%d->L%d){TimeTaken: %fs, filesImpacted: %d, from:L%d: %v, to:L%d: %v, new_files:L%d: %v}",
+			lvl, lvl+1,
+			float64(time.Now().UnixNano()-startTime)/float64(time.Second),
+			len(lvlFiles)+len(refs),
+			lvl, fromFilesIds,
+			lvl+1, toFilesIds,
+			lvl+1, newFilesIds,
+		)
 	}
 }
 
@@ -188,7 +213,7 @@ func (i *Compactor) RunLevelZeroCompaction() {
 
 		if score > 1 {
 			i.levelZero.Lock()
-			fmt.Println("level zero compaction...")
+			startTime := time.Now().UnixNano()
 
 			l0 := i.sstableManager.GetFilesFromLayer(0)
 			l1 := i.sstableManager.GetFilesFromLayer(1)
@@ -198,7 +223,7 @@ func (i *Compactor) RunLevelZeroCompaction() {
 			files = append(files, l1...)
 
 			row := i.SSTableLoader(files)
-			i.SplitAndSave(row, i.strategy.PartitionSize(i.sstableManager.lsm, 1), 1)
+			refs := i.SplitAndSave(row, i.strategy.PartitionSize(i.sstableManager.lsm, 1), 1)
 
 			// request file removal
 			sstableRefs := make([]*SSTableReferance, 0)
@@ -211,8 +236,29 @@ func (i *Compactor) RunLevelZeroCompaction() {
 
 			i.manifest.RemoveTables(sstableRefs)
 			i.manifest.Commit()
-			fmt.Println("level zero compaction completed!")
 			i.levelZero.Unlock()
+
+			from := make([]int, 0)
+			for _, l := range l0 {
+				from = append(from, l.id)
+			}
+
+			to := make([]int, 0)
+			for _, l := range l1 {
+				to = append(to, l.id)
+			}
+
+			newFiles := make([]int, 0)
+			for _, l := range refs {
+				newFiles = append(newFiles, l.id)
+			}
+
+			i.logger.Printf(
+				"LevelZeroCompaction(L0->L1){ TimeTaken: %fs, filesImpacted: %d, from:L0: %v, to:L1: %v, new_files:L1: %v }",
+				float64(time.Now().UnixNano()-startTime)/float64(time.Second),
+				len(refs)+len(files),
+				from, to, newFiles,
+			)
 		}
 	}
 }
@@ -273,7 +319,7 @@ func Merge(a []*TableRow, b []*TableRow, comparator Comparator[*TableRow]) []*Ta
 	return newList
 }
 
-func (i *Compactor) SplitAndSave(sorted []*TableRow, partitionSize int, writeLevel int) {
+func (i *Compactor) SplitAndSave(sorted []*TableRow, partitionSize int, writeLevel int) []*SSTableReferance {
 	totalSize := 0
 	for _, item := range sorted {
 		totalSize += item.key.GetSize() + 8*4
@@ -326,6 +372,7 @@ func (i *Compactor) SplitAndSave(sorted []*TableRow, partitionSize int, writeLev
 	// wait for all writers
 	wg.Wait()
 	i.manifest.AddTables(ids)
+	return ids
 }
 
 type CompactionStrategy interface {

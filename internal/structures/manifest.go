@@ -368,18 +368,22 @@ func (m *Manifest) GetDBid() string {
 	return m.id
 }
 
-func (m *Manifest) Print() {
+func (m *Manifest) String() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	fmt.Println("SSTable Id Counter: ", m.sstableIdCounter)
-	fmt.Println("WAL Id Counter: ", m.walIdCounter)
-	fmt.Println("SSTable List: ")
-	for _, elm := range m.sstables.list {
-		fmt.Print(*elm)
-	}
-	fmt.Println()
-	fmt.Println("WAL List: ", m.walIds.list)
+	var buf bytes.Buffer
+	buf.WriteString("Manifest{")
+	buf.WriteString(fmt.Sprintf("id: %s, ", m.id))
+	buf.WriteString(fmt.Sprintf("version: %d, ", m.version))
+	buf.WriteString(fmt.Sprintf("lastSnapshot: %d, ", m.lastSnapshot))
+	buf.WriteString(fmt.Sprintf("sstableIdCounter: %d, ", m.sstableIdCounter))
+	buf.WriteString(fmt.Sprintf("walIdCounter: %d, ", m.walIdCounter))
+	buf.WriteString(fmt.Sprintf("sstables: %v, ", m.sstables.list))
+	buf.WriteString(fmt.Sprintf("walIds: %v", m.walIds.list))
+	buf.WriteString("}")
+
+	return buf.String()
 }
 
 type SSTableReferance struct {

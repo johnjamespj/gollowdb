@@ -2,16 +2,22 @@ package structures
 
 import (
 	"errors"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/google/uuid"
 )
 
 type DBOption struct {
+	logger                 *log.Logger
 	noCopy                 noCopy
 	path                   string
-	id                     string
+	id                     *string
 	createIfNotExists      bool
 	maxInmemoryWriteBuffer int
 	comparator             Comparator[*DataSlice]
@@ -19,7 +25,7 @@ type DBOption struct {
 
 func NewDBOption() *DBOption {
 	return &DBOption{
-		path:                   ".",
+		path:                   "data",
 		maxInmemoryWriteBuffer: 10 * 1000 * 1000,
 		createIfNotExists:      false,
 		comparator: func(a, b *DataSlice) int {
@@ -49,6 +55,7 @@ func (i *DBOption) SetComparator(comparator Comparator[*DataSlice]) {
 }
 
 type DB struct {
+	logger               *log.Logger
 	option               *DBOption
 	manifest             *Manifest
 	sstableManager       *SSTableManager
@@ -78,7 +85,14 @@ func NewDB(option *DBOption) *DB {
 	}
 
 	sstableUpdateStream := make(chan []SSTableUpdate)
-	manifest := OpenManifest(option.path, option.id)
+
+	if option.id == nil {
+		newID := uuid.New().String()
+		option.id = &newID
+	}
+
+	manifest := OpenManifest(option.path, *option.id)
+	option.id = &manifest.id
 
 	currentWALID := manifest.GetNextWALID()
 	memtable := NewSkipListMemtable(option.path, currentWALID, option.comparator)
@@ -101,7 +115,19 @@ func NewDB(option *DBOption) *DB {
 		memtableUpdateStream: &memtableUpdateStream,
 	}
 
-	db.sstableManager = NewSSTableManager(option.path, option.comparator, manifest, cmp, &db.waitGroup)
+	option.id = &manifest.id
+	if option.logger != nil {
+		db.logger = option.logger
+	} else {
+		logFile := filepath.Join(option.path, "LOG")
+		file, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			panic(err)
+		}
+		db.logger = log.New(file, fmt.Sprintf("[%s] ", *option.id), log.LstdFlags)
+	}
+
+	db.sstableManager = NewSSTableManager(option.path, option.comparator, manifest, cmp, &db.waitGroup, db.logger)
 	db.sstableManager.AddAllSSTables(manifest.GetAllTables())
 	db.manifest.sstableManager = db.sstableManager
 
@@ -140,6 +166,10 @@ func NewDB(option *DBOption) *DB {
 
 	// start background memtable flush
 	go db.memtableFlushLoop(&memtableUpdateStream, &db.waitGroup)
+
+	// log when db is opened
+	db.logger.Printf("database opened with id: %s at path: %s on %s", *option.id, option.path, time.Now().Format(time.RFC3339))
+	db.logger.Println(manifest.String())
 
 	return db
 }
@@ -275,6 +305,8 @@ func (i *DB) memtableFlushLoop(memtableUpdateStream *chan bool, waitGroup *sync.
 			return
 		}
 
+		startTime := time.Now().UnixNano()
+
 		i.mu.RLock()
 		i.manifest.mu.RLock()
 		imm := make([]*NavigableList[*TableRow], len(i.immutablesMemtable))
@@ -336,5 +368,13 @@ func (i *DB) memtableFlushLoop(memtableUpdateStream *chan bool, waitGroup *sync.
 		}
 
 		i.mu.Unlock()
+
+		// log changes
+		i.logger.Printf(
+			"MemTableFlush{ TimeTaken: %fs, tables: %v, toSSTable: %d }",
+			float64(time.Now().UnixNano()-startTime)/float64(time.Second),
+			walsToRemove,
+			newSSTableId,
+		)
 	}
 }
