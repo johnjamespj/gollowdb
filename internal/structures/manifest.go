@@ -13,21 +13,22 @@ import (
 )
 
 type Manifest struct {
-	path                string
-	sstableIdCounter    int64
-	walIdCounter        int64
-	version             int64
-	id                  string
-	sstables            *SortedList[*SSTableReferance]
-	walIds              *SortedList[int]
-	sstableUpdateStream *chan []SSTableUpdate
-	lastSnapshot        int64
-	mu                  sync.RWMutex
+	path             string
+	sstableIdCounter int64
+	walIdCounter     int64
+	version          int64
+	id               string
+	sstables         *SortedList[*SSTableReferance]
+	walIds           *SortedList[int]
+	lastSnapshot     int64
+	mu               sync.RWMutex
+	sstableManager   *SSTableManager
 
 	bufferedUpdate []SSTableUpdate
+	walToRemove    []int
 }
 
-func OpenManifest(path string, id string, sstableUpdateStream *chan []SSTableUpdate) *Manifest {
+func OpenManifest(path string, id string) *Manifest {
 	var manifest Manifest
 	if _, err := os.Stat(filepath.Join(path, "MANIFEST")); errors.Is(err, os.ErrNotExist) {
 		// create a new manifest object
@@ -35,12 +36,11 @@ func OpenManifest(path string, id string, sstableUpdateStream *chan []SSTableUpd
 		walIds := make([]int, 0)
 
 		manifest = Manifest{
-			sstableUpdateStream: sstableUpdateStream,
-			path:                path,
-			sstableIdCounter:    0,
-			walIdCounter:        0,
-			version:             0,
-			id:                  id,
+			path:             path,
+			sstableIdCounter: 0,
+			walIdCounter:     0,
+			version:          0,
+			id:               id,
 			sstables: NewSortedList(sstableList, func(a *SSTableReferance, b *SSTableReferance) int {
 				c := a.level - b.level
 
@@ -74,7 +74,6 @@ func OpenManifest(path string, id string, sstableUpdateStream *chan []SSTableUpd
 		}
 
 		manifest.path = path
-		manifest.sstableUpdateStream = sstableUpdateStream
 	}
 
 	return &manifest
@@ -211,9 +210,15 @@ func (m *Manifest) Commit() {
 
 	// commit the update to manager
 	if len(m.bufferedUpdate) > 0 {
-		*m.sstableUpdateStream <- m.bufferedUpdate
+		m.sstableManager.Updater(m.bufferedUpdate)
 		m.bufferedUpdate = make([]SSTableUpdate, 0)
 	}
+
+	// remove wal
+	for _, walId := range m.walToRemove {
+		os.Remove(filepath.Join(m.path, fmt.Sprintf("l_%d.wal", walId)))
+	}
+	m.walToRemove = make([]int, 0)
 
 	buf := bytes.NewBuffer([]byte{})
 	m.PackSSTableMetadata(buf)
@@ -327,6 +332,7 @@ func (m *Manifest) RemoveWALIds(ids []int) {
 
 	for _, elm := range ids {
 		m.walIds.Remove(elm)
+		m.walToRemove = append(m.walToRemove, elm)
 	}
 }
 

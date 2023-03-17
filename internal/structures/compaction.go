@@ -112,6 +112,9 @@ func (i *Compactor) RunCompactor() {
 		i.CalculateScore()
 		tasks := i.CreateTaskList()
 
+		fmt.Println("Compaction started")
+		i.levelZero.Lock()
+
 		if len(tasks) == 0 {
 			i.levelZero.Unlock()
 			fmt.Println("Compaction cancelled")
@@ -226,8 +229,11 @@ func (i *Compactor) SSTableLoader(tables []*SSTableReaderRef) []*TableRow {
 
 		// parallel reads
 		go func(t *SSTableReaderRef) {
+			i.sstableManager.mu.RLock()
+			defer i.sstableManager.mu.RUnlock()
+			defer wg.Done()
+
 			res <- t.reader.ToList()
-			wg.Done()
 		}(table)
 	}
 

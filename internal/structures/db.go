@@ -55,6 +55,7 @@ type DB struct {
 	currentWALID         int64
 	currentMemtable      *SkipListMemtable
 	immutablesMemtable   []*NavigableList[*TableRow]
+	immutableWAL         []int
 	memtableUpdateStream *chan bool
 	sstableUpdateStream  *chan []SSTableUpdate
 	mu                   sync.RWMutex
@@ -77,7 +78,7 @@ func NewDB(option *DBOption) *DB {
 	}
 
 	sstableUpdateStream := make(chan []SSTableUpdate)
-	manifest := OpenManifest(option.path, option.id, &sstableUpdateStream)
+	manifest := OpenManifest(option.path, option.id)
 
 	currentWALID := manifest.GetNextWALID()
 	memtable := NewSkipListMemtable(option.path, currentWALID, option.comparator)
@@ -100,8 +101,9 @@ func NewDB(option *DBOption) *DB {
 		memtableUpdateStream: &memtableUpdateStream,
 	}
 
-	db.sstableManager = NewSSTableManager(option.path, option.comparator, &sstableUpdateStream, manifest, cmp, &db.waitGroup)
+	db.sstableManager = NewSSTableManager(option.path, option.comparator, manifest, cmp, &db.waitGroup)
 	db.sstableManager.AddAllSSTables(manifest.GetAllTables())
+	db.manifest.sstableManager = db.sstableManager
 
 	// load all WALs
 	immutableTable := NewSortedList(make([]*TableRow, 0), cmp)
@@ -114,6 +116,7 @@ func NewDB(option *DBOption) *DB {
 			if len(rows) > 0 {
 				SortTableRow(&rows)
 				immutableTable.Merge(rows)
+				db.immutableWAL = append(db.immutableWAL, id)
 			} else if len(rows) == 0 {
 				manifest.RemoveWALId(id)
 				manifest.Commit()
@@ -150,12 +153,14 @@ func (i *DB) Put(key any, value any) {
 	if i.currentMemtable.GetSize() >= i.option.maxInmemoryWriteBuffer {
 		var navList NavigableList[*TableRow] = i.currentMemtable.table
 		i.immutablesMemtable = append(i.immutablesMemtable, &navList)
+		i.immutableWAL = append(i.immutableWAL, int(i.currentWALID))
 
 		lastSnapshotId := i.currentMemtable.snapshotIdCounter
 
 		currentWALID := i.manifest.GetNextWALID()
 		i.currentMemtable = NewSkipListMemtable(i.option.path, currentWALID, i.option.comparator)
 		i.currentMemtable.snapshotIdCounter = lastSnapshotId
+		i.currentWALID = currentWALID
 		i.manifest.SetLastSnapshot(lastSnapshotId)
 		i.manifest.AddWalId(int(currentWALID))
 		i.manifest.SetLastSnapshot(i.currentMemtable.snapshotIdCounter)
@@ -174,6 +179,13 @@ func (i *DB) Delete(key any) {
 	defer i.mu.RUnlock()
 
 	i.currentMemtable.Delete(key)
+}
+
+func (i *DB) GetImmutableMemtables() []*NavigableList[*TableRow] {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	return i.immutablesMemtable
 }
 
 func (i *DB) Get(key any) *DataSlice {
@@ -264,19 +276,13 @@ func (i *DB) memtableFlushLoop(memtableUpdateStream *chan bool, waitGroup *sync.
 		}
 
 		i.mu.RLock()
+		i.manifest.mu.RLock()
 		imm := make([]*NavigableList[*TableRow], len(i.immutablesMemtable))
+		walsToRemove := make([]int, len(i.immutableWAL))
 		copy(imm, i.immutablesMemtable)
-		list := i.manifest.GetAllWALIds()
-		curr := int(i.currentWALID)
+		copy(walsToRemove, i.immutableWAL)
+		i.manifest.mu.RUnlock()
 		i.mu.RUnlock()
-
-		// filter current wal
-		walsToRemove := make([]int, 0)
-		for _, id := range list {
-			if curr != id {
-				walsToRemove = append(walsToRemove, id)
-			}
-		}
 
 		// Skip flushing if no
 		if len(imm) == 0 {
@@ -306,11 +312,6 @@ func (i *DB) memtableFlushLoop(memtableUpdateStream *chan bool, waitGroup *sync.
 		i.manifest.RemoveWALIds(walsToRemove)
 		i.manifest.Commit()
 
-		// delete all WAL
-		for _, id := range walsToRemove {
-			DeleteWAL(i.option.path, id)
-		}
-
 		// remove memtable from array
 		i.mu.Lock()
 
@@ -323,6 +324,17 @@ func (i *DB) memtableFlushLoop(memtableUpdateStream *chan bool, waitGroup *sync.
 				}
 			}
 		}
+
+		// remove common address in i.immutableWAL and walsToRemove
+		for _, id := range walsToRemove {
+			for j, t := range i.immutableWAL {
+				if t == id {
+					i.immutableWAL = append(i.immutableWAL[:j], i.immutableWAL[j+1:]...)
+					break
+				}
+			}
+		}
+
 		i.mu.Unlock()
 	}
 }

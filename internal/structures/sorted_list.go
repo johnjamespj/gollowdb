@@ -318,6 +318,7 @@ func (v *SortedList[V]) Sub(fromKey V, toKey V, fromInclusive bool, toInclusive 
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
+	// find the first element that is greater than fromKey
 	i, _ := sort.Find(len(v.list), func(i int) int {
 		return v.comparator(fromKey, v.list[i])
 	})
@@ -330,30 +331,41 @@ func (v *SortedList[V]) Sub(fromKey V, toKey V, fromInclusive bool, toInclusive 
 		i++
 	}
 
-	j, found := sort.Find(len(v.list), func(i int) int {
+	// find the first element that is greater than toKey
+	j, _ := sort.Find(len(v.list), func(i int) int {
 		return v.comparator(toKey, v.list[i])
 	})
 
-	if !toInclusive {
-		if found && j > 0 {
-			j--
-		} else if found {
-			j = -1
-		}
-	} else {
-		for j < len(v.list)-1 && v.comparator(v.list[j+1], toKey) == 0 {
+	for j < len(v.list) && !toInclusive {
+		if v.comparator(v.list[j+1], toKey) > 0 {
 			j++
+			break
 		}
+		j++
 	}
 
-	itr := Iterable[V]{
-		recreaterCallback: func() IteratorBase[V] {
-			return &SortedListIterator[V]{
-				list:  v.list[i:j],
-				index: -1,
-				mu:    &v.mu,
-			}
-		},
+	var itr Iterable[V]
+	if i > j || i >= len(v.list) || j < 0 {
+		emptyArray := make([]V, 0)
+		itr = Iterable[V]{
+			recreaterCallback: func() IteratorBase[V] {
+				return &SortedListIterator[V]{
+					list:  emptyArray,
+					index: -1,
+					mu:    &v.mu,
+				}
+			},
+		}
+	} else {
+		itr = Iterable[V]{
+			recreaterCallback: func() IteratorBase[V] {
+				return &SortedListIterator[V]{
+					list:  v.list[i : j+1],
+					index: -1,
+					mu:    &v.mu,
+				}
+			},
+		}
 	}
 
 	itr.base = itr

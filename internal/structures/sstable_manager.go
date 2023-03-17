@@ -23,17 +23,16 @@ type SSTableReaderRef struct {
 }
 
 type SSTableManager struct {
-	compactor           *Compactor
-	sstableUpdateStream *chan []SSTableUpdate
-	path                string
-	sstable             *SortedList[*SSTableReaderRef]
-	comparator          Comparator[*DataSlice]
-	mu                  sync.RWMutex
-	lsm                 []*LSMLevel
-	lsmUpdateStream     *chan bool
+	compactor       *Compactor
+	path            string
+	sstable         *SortedList[*SSTableReaderRef]
+	comparator      Comparator[*DataSlice]
+	mu              sync.RWMutex
+	lsm             []*LSMLevel
+	lsmUpdateStream *chan bool
 }
 
-func NewSSTableManager(path string, comparator Comparator[*DataSlice], sstableUpdateStream *chan []SSTableUpdate, manifest *Manifest, rowComparator Comparator[*TableRow], wg *sync.WaitGroup) *SSTableManager {
+func NewSSTableManager(path string, comparator Comparator[*DataSlice], manifest *Manifest, rowComparator Comparator[*TableRow], wg *sync.WaitGroup) *SSTableManager {
 	cmp := func(a *SSTableReaderRef, b *SSTableReaderRef) int {
 		c := a.level - b.level
 		if c == 0 {
@@ -44,44 +43,38 @@ func NewSSTableManager(path string, comparator Comparator[*DataSlice], sstableUp
 
 	lsmUpdateStream := make(chan bool, 100)
 	manager := &SSTableManager{
-		sstableUpdateStream: sstableUpdateStream,
-		sstable:             NewSortedList(make([]*SSTableReaderRef, 0), cmp),
-		comparator:          comparator,
-		path:                path,
-		lsm:                 make([]*LSMLevel, 0),
-		lsmUpdateStream:     &lsmUpdateStream,
+		sstable:         NewSortedList(make([]*SSTableReaderRef, 0), cmp),
+		comparator:      comparator,
+		path:            path,
+		lsm:             make([]*LSMLevel, 0),
+		lsmUpdateStream: &lsmUpdateStream,
 	}
 	manager.compactor = NewCompactor(&lsmUpdateStream, manager, manifest, rowComparator, wg)
-
-	go manager.Updater()
 
 	return manager
 }
 
-func (i *SSTableManager) Updater() {
-	for {
-		val := <-*i.sstableUpdateStream
-		i.mu.Lock()
+func (i *SSTableManager) Updater(val []SSTableUpdate) {
+	addList := make([]*SSTableReferance, 0)
+	removeList := make([]*SSTableReferance, 0)
 
-		addList := make([]*SSTableReferance, 0)
-		removeList := make([]*SSTableReferance, 0)
-
-		for _, update := range val {
-			if update.action == ADD {
-				addList = append(addList, update.tables...)
-			} else if update.action == REMOVE {
-				removeList = append(removeList, update.tables...)
-			}
+	for _, update := range val {
+		if update.action == ADD {
+			addList = append(addList, update.tables...)
+		} else if update.action == REMOVE {
+			removeList = append(removeList, update.tables...)
 		}
-
-		i.AddAllSSTables(addList)
-		i.RemoveAllSSTable(removeList)
-		i.mu.Unlock()
-		*i.lsmUpdateStream <- true
 	}
+
+	i.AddAllSSTables(addList)
+	i.RemoveAllSSTable(removeList)
+	*i.lsmUpdateStream <- true
 }
 
 func (i *SSTableManager) AddAllSSTables(refs []*SSTableReferance) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
 	for _, elm := range refs {
 		sstable, err := NewSSTableReader(i.path, uint64(elm.level), uint64(elm.id), i.comparator)
 		if err != nil {
@@ -114,6 +107,9 @@ func (i *SSTableManager) AddAllSSTables(refs []*SSTableReferance) {
 }
 
 func (i *SSTableManager) RemoveAllSSTable(refs []*SSTableReferance) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
 	for _, elm := range refs {
 		var val *SSTableReaderRef
 
