@@ -113,6 +113,8 @@ func (i *Compactor) RunCompactor() {
 		tasks := i.CreateTaskList()
 
 		if len(tasks) == 0 {
+			i.levelZero.Unlock()
+			fmt.Println("Compaction cancelled")
 			continue
 		}
 
@@ -120,22 +122,18 @@ func (i *Compactor) RunCompactor() {
 		score := tasks[0].score
 
 		delta := int(i.strategy.CalculateDelta(i.sstableManager.lsm, lvl)/i.strategy.PartitionSize(i.sstableManager.lsm, lvl)) + 1
-		fmt.Println("=====")
-		fmt.Printf("score: %f level: %d delta: %d\n", score, lvl, delta)
-		fmt.Println("=====")
 
 		if score <= 1 || lvl == 0 {
+			i.levelZero.Unlock()
+			fmt.Println("Compaction cancelled")
 			continue
-		}
-
-		if lvl == 1 {
-			i.levelZero.Lock()
 		}
 
 		lvlFiles := i.sstableManager.GetFilesFromLayer(lvl)
 
 		if delta >= len(lvlFiles) {
 			i.levelZero.Unlock()
+			fmt.Println("Compaction cancelled")
 			continue
 		}
 
@@ -168,10 +166,8 @@ func (i *Compactor) RunCompactor() {
 		}
 		i.manifest.RemoveTables(sstableRefs)
 		i.manifest.Commit()
-
-		if lvl == 1 {
-			i.levelZero.Unlock()
-		}
+		fmt.Println("Compaction finished")
+		i.levelZero.Unlock()
 	}
 }
 
@@ -188,8 +184,8 @@ func (i *Compactor) RunLevelZeroCompaction() {
 		score := i.strategy.CalculateScore(i.sstableManager.lsm, 0)
 
 		if score > 1 {
-			fmt.Println("Start level zero compaction")
 			i.levelZero.Lock()
+			fmt.Println("level zero compaction...")
 
 			l0 := i.sstableManager.GetFilesFromLayer(0)
 			l1 := i.sstableManager.GetFilesFromLayer(1)
@@ -199,7 +195,6 @@ func (i *Compactor) RunLevelZeroCompaction() {
 			files = append(files, l1...)
 
 			row := i.SSTableLoader(files)
-			fmt.Printf("PartitionSize: %d \n", i.strategy.PartitionSize(i.sstableManager.lsm, 1))
 			i.SplitAndSave(row, i.strategy.PartitionSize(i.sstableManager.lsm, 1), 1)
 
 			// request file removal
@@ -213,6 +208,7 @@ func (i *Compactor) RunLevelZeroCompaction() {
 
 			i.manifest.RemoveTables(sstableRefs)
 			i.manifest.Commit()
+			fmt.Println("level zero compaction completed!")
 			i.levelZero.Unlock()
 		}
 	}
@@ -305,6 +301,20 @@ func (i *Compactor) SplitAndSave(sorted []*TableRow, partitionSize int, writeLev
 		}
 
 		acc += item.key.GetSize() + item.value.GetSize() + 8*4
+	}
+
+	// check if there is a remainder
+	if lastIdx < len(sorted) {
+		wg.Add(1)
+		id := i.manifest.GetNextSSTableID()
+		go func(a []*TableRow, id int64) {
+			WriteSSTable(a, 1, 10*1000, i.sstableManager.path, uint64(writeLevel), uint64(id))
+			wg.Done()
+		}(sorted[lastIdx:], id)
+		ids = append(ids, &SSTableReferance{
+			level: writeLevel,
+			id:    int(id),
+		})
 	}
 
 	// wait for all writers

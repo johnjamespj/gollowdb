@@ -2,7 +2,6 @@ package structures
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -91,7 +90,7 @@ func NewDB(option *DBOption) *DB {
 		return option.comparator(a.key, b.key)
 	}
 
-	memtableUpdateStream := make(chan bool, 100)
+	memtableUpdateStream := make(chan bool)
 	db := &DB{
 		sstableUpdateStream:  &sstableUpdateStream,
 		option:               option,
@@ -256,7 +255,6 @@ func (i *DB) Close() {
 }
 
 func (i *DB) memtableFlushLoop(memtableUpdateStream *chan bool, waitGroup *sync.WaitGroup) {
-	fmt.Println("Started Memtable flush task ...")
 	waitGroup.Add(1)
 	for {
 		val := <-*memtableUpdateStream
@@ -284,8 +282,6 @@ func (i *DB) memtableFlushLoop(memtableUpdateStream *chan bool, waitGroup *sync.
 		if len(imm) == 0 {
 			continue
 		}
-
-		fmt.Printf("Started flushing %d memtables\n", len(imm))
 
 		// save memtables to file
 		sortedRows := NewSortedList(make([]*TableRow, 0), i.currentMemtable.table.comparator)
@@ -328,7 +324,5 @@ func (i *DB) memtableFlushLoop(memtableUpdateStream *chan bool, waitGroup *sync.
 			}
 		}
 		i.mu.Unlock()
-
-		fmt.Println("Commited flush...")
 	}
 }
