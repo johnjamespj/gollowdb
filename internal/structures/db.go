@@ -132,10 +132,6 @@ func NewDB(option *DBOption) *DB {
 	return db
 }
 
-func (i *DB) GetManager() *SSTableManager {
-	return i.sstableManager
-}
-
 func (i *DB) Put(key any, value any) {
 	i.mu.Lock()
 	if i.currentMemtable.GetSize() >= i.option.maxInmemoryWriteBuffer {
@@ -167,13 +163,6 @@ func (i *DB) Delete(key any) {
 	defer i.mu.RUnlock()
 
 	i.currentMemtable.Delete(key)
-}
-
-func (i *DB) GetImmutableMemtables() []*NavigableList[*TableRow] {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-
-	return i.immutablesMemtable
 }
 
 func (i *DB) Get(key any) *DataSlice {
@@ -240,10 +229,6 @@ func (i *DB) Get(key any) *DataSlice {
 	}
 
 	return nil
-}
-
-func (i *DB) Compact() {
-	*i.sstableManager.lsmUpdateStream <- true
 }
 
 func (i *DB) Close() {
