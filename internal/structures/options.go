@@ -15,6 +15,7 @@ type DBOption struct {
 	maxInmemoryWriteBuffer int
 	comparatorName         string
 	comparator             Comparator[*DataSlice]
+	merger                 Merger
 }
 
 func NewDBOption() *DBOption {
@@ -32,6 +33,7 @@ func NewDBOption() *DBOption {
 			levelFactor:           2,
 			sstableFileSize:       20 * 1000 * 1000,
 		},
+		merger: &DefaultMerger{},
 	}
 }
 

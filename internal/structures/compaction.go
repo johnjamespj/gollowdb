@@ -22,6 +22,7 @@ type Compactor struct {
 
 	levelZeroStream  *chan bool
 	compactionStream *chan bool
+	merger           Merger
 }
 
 func NewCompactor(options *DBOption, lsmUpdateStream *chan bool, sstableManager *SSTableManager, manifest *Manifest, comparator Comparator[*TableRow], wg *sync.WaitGroup, log *log.Logger) *Compactor {
@@ -47,6 +48,7 @@ func NewCompactor(options *DBOption, lsmUpdateStream *chan bool, sstableManager 
 		wg:               wg,
 		compactionStream: &compactionStream,
 		levelZeroStream:  &levelZeroStream,
+		merger:           options.merger,
 	}
 
 	go func() {
@@ -281,13 +283,37 @@ func (i *Compactor) SSTableLoader(tables []*SSTableReaderRef) []*TableRow {
 	}
 
 	wg.Wait()
+
+	// sort and merge all the rowss
 	list := make([]*TableRow, 0)
 	for j := 0; j < len(tables); j++ {
 		r := <-res
 		list = Merge(list, r, i.comparator)
 	}
 
-	return list
+	// merge rows with same key
+	newList := make([]*TableRow, 0)
+	cur := list[0]
+	acc := make([]*TableRow, 1)
+	acc[0] = cur
+	for j := 1; j < len(list); j++ {
+		row := list[j]
+		if i.sstableManager.comparator(cur.key, row.key) == 0 {
+			acc = append(acc, row)
+		} else {
+			if len(acc) > 1 {
+				acc = i.merger.MergeRows(acc)
+			}
+
+			newList = append(newList, acc...)
+
+			acc = make([]*TableRow, 1)
+			acc[0] = row
+			cur = row
+		}
+	}
+
+	return newList
 }
 
 func Merge(a []*TableRow, b []*TableRow, comparator Comparator[*TableRow]) []*TableRow {
@@ -415,4 +441,19 @@ func (i *LeveledCompaction) CalculateLevelTargetSize(level int) int {
 		return 0
 	}
 	return i.options.maxBaseLevelSize * int(math.Pow(float64(i.options.levelFactor), float64(level-1)))
+}
+
+type Merger interface {
+	MergeRows(rows []*TableRow) []*TableRow
+}
+
+type DefaultMerger struct{}
+
+func (i *DefaultMerger) MergeRows(rows []*TableRow) []*TableRow {
+	// remove all if the last row is DELETE
+	if rows[len(rows)-1].rowType == DELETE {
+		return []*TableRow{}
+	}
+
+	return []*TableRow{rows[len(rows)-1]}
 }
