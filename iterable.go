@@ -1,4 +1,4 @@
-package structures
+package gollowdb
 
 import "container/list"
 

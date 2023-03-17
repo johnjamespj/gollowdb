@@ -1,4 +1,4 @@
-package structures
+package gollowdb
 
 // Container that holds the data
 type DataSlice struct {

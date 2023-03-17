@@ -1,4 +1,4 @@
-package structures
+package gollowdb
 
 type Comparator[V any] func(a V, b V) int
 

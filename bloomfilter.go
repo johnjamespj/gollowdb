@@ -1,4 +1,4 @@
-package structures
+package gollowdb
 
 // A Bloom filter is a space-efficient probabilistic data structure
 // can as "possibly in set" or "definitely not in set" question efficiently
