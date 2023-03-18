@@ -280,6 +280,72 @@ func (i *DB) Sub(key any, endKey any) *DBIterator {
 	return NewDBIterator(i, NewDataSlice(key), NewDataSlice(endKey))
 }
 
+func (i *DB) Head(key any) *DBIterator {
+	return NewDBIterator(i, i.FirstRow().key, NewDataSlice(key))
+}
+
+func (i *DB) FirstRow() *TableRow {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	i.sstableManager.mu.RLock()
+	defer i.sstableManager.mu.RUnlock()
+
+	list := NewSortedList(make([]*TableRow, 0), func(a, b *TableRow) int {
+		c := i.option.comparator(a.key, b.key)
+		if c == 0 {
+			return int(b.snapshotId) - int(a.snapshotId)
+		}
+
+		return c
+	})
+
+	list.AddAll(i.currentMemtable.table.Get(*i.currentMemtable.table.First()).ToList())
+	for _, table := range i.immutablesMemtable {
+		list.AddAll((*table).Get(*i.currentMemtable.table.First()).ToList())
+	}
+
+	for j := 0; j < i.sstableManager.LayerCount(); j++ {
+		tables := i.sstableManager.GetFilesFromLayer(j)
+
+		for _, table := range tables {
+			list.AddAll(table.reader.Get(*i.currentMemtable.table.First()).ToList())
+		}
+	}
+
+	return *list.First()
+}
+
+func (i *DB) LastRow() *TableRow {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	i.sstableManager.mu.RLock()
+	defer i.sstableManager.mu.RUnlock()
+
+	list := NewSortedList(make([]*TableRow, 0), func(a, b *TableRow) int {
+		c := i.option.comparator(a.key, b.key)
+		if c == 0 {
+			return int(a.snapshotId) - int(b.snapshotId)
+		}
+
+		return c
+	})
+
+	list.AddAll(i.currentMemtable.table.Get(*i.currentMemtable.table.Last()).ToList())
+	for _, table := range i.immutablesMemtable {
+		list.AddAll((*table).Get(*i.currentMemtable.table.Last()).ToList())
+	}
+
+	for j := 0; j < i.sstableManager.LayerCount(); j++ {
+		tables := i.sstableManager.GetFilesFromLayer(j)
+
+		for _, table := range tables {
+			list.AddAll(table.reader.Get(*i.currentMemtable.table.Last()).ToList())
+		}
+	}
+
+	return *list.Last()
+}
+
 func (i *DB) Close() {
 	*i.memtableUpdateStream <- true
 	*i.memtableUpdateStream <- false
