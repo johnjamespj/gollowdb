@@ -2,15 +2,17 @@ package gollowdb
 
 type DBIterator struct {
 	last     *DataSlice
+	stop     *DataSlice
 	lastRow  *TableRow
 	snapshot int
 	db       *DB
 }
 
-func NewDBIterator(db *DB, startKey *DataSlice) *DBIterator {
+func NewDBIterator(db *DB, startKey *DataSlice, endKey *DataSlice) *DBIterator {
 	return &DBIterator{
 		last:     startKey,
 		lastRow:  nil,
+		stop:     endKey,
 		snapshot: db.LockSnapshot(),
 		db:       db,
 	}
@@ -19,6 +21,10 @@ func NewDBIterator(db *DB, startKey *DataSlice) *DBIterator {
 func (i *DBIterator) MoveNext() bool {
 	i.db.mu.RLock()
 	defer i.db.mu.RUnlock()
+
+	if i.stop != nil && i.db.option.comparator(i.last, i.stop) >= 0 {
+		return false
+	}
 
 	for {
 		list := NewSortedList(make([]*TableRow, 0), func(a, b *TableRow) int {
@@ -94,6 +100,13 @@ func (i *DBIterator) MoveNext() bool {
 
 		i.last = list.list[0].key
 		i.lastRow = list.list[0]
+
+		// check if we reach the end
+		if i.stop != nil && i.db.option.comparator(i.last, i.stop) >= 0 {
+			i.last = nil
+			i.lastRow = nil
+			break
+		}
 	}
 
 	return false

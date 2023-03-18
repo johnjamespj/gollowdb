@@ -273,7 +273,11 @@ func (i *DB) ReleaseSnapshot(snapshot int) {
 }
 
 func (i *DB) Tail(key any) *DBIterator {
-	return NewDBIterator(i, NewDataSlice(key))
+	return NewDBIterator(i, NewDataSlice(key), nil)
+}
+
+func (i *DB) Sub(key any, endKey any) *DBIterator {
+	return NewDBIterator(i, NewDataSlice(key), NewDataSlice(endKey))
 }
 
 func (i *DB) Close() {
