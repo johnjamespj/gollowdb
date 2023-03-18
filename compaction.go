@@ -46,6 +46,8 @@ type Compactor struct {
 	levelZeroStream  *chan bool
 	compactionStream *chan bool
 	snapshotsHolds   *SortedList[int]
+
+	options *DBOption
 }
 
 func NewCompactor(options *DBOption, snapshotsHolds *SortedList[int], lsmUpdateStream *chan bool, sstableManager *SSTableManager, manifest *Manifest, comparator Comparator[*TableRow], wg *sync.WaitGroup, log *log.Logger) *Compactor {
@@ -72,6 +74,7 @@ func NewCompactor(options *DBOption, snapshotsHolds *SortedList[int], lsmUpdateS
 		compactionStream: &compactionStream,
 		levelZeroStream:  &levelZeroStream,
 		snapshotsHolds:   snapshotsHolds,
+		options:          options,
 	}
 
 	go func() {
@@ -386,7 +389,7 @@ func (i *Compactor) SplitAndSave(sorted []*TableRow, partitionSize int, writeLev
 			wg.Add(1)
 			id := i.manifest.GetNextSSTableID()
 			go func(a []*TableRow, id int64) {
-				WriteSSTable(a, 1, 10*1000, i.sstableManager.path, uint64(writeLevel), uint64(id))
+				WriteSSTable(a, 1, 10*1000, i.sstableManager.path, uint64(writeLevel), uint64(id), i.options.compression)
 				wg.Done()
 			}(sorted[lastIdx:j], id)
 			ids = append(ids, &SSTableReferance{
@@ -406,7 +409,7 @@ func (i *Compactor) SplitAndSave(sorted []*TableRow, partitionSize int, writeLev
 		wg.Add(1)
 		id := i.manifest.GetNextSSTableID()
 		go func(a []*TableRow, id int64) {
-			WriteSSTable(a, 1, 10*1000, i.sstableManager.path, uint64(writeLevel), uint64(id))
+			WriteSSTable(a, 1, 10*1000, i.sstableManager.path, uint64(writeLevel), uint64(id), i.options.compression)
 			wg.Done()
 		}(sorted[lastIdx:], id)
 		ids = append(ids, &SSTableReferance{
@@ -456,7 +459,7 @@ func (i *LeveledCompaction) CalculateDelta(lsm []*LSMLevel, level int) int {
 }
 
 func (i *LeveledCompaction) PartitionSize(lsm []*LSMLevel, level int) int {
-	return i.options.sstableFileSize
+	return i.options.sstableFileSize * int(math.Pow(float64(i.options.levelFactor), float64(level)))
 }
 
 func (i *LeveledCompaction) CalculateLevelTargetSize(level int) int {

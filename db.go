@@ -392,7 +392,7 @@ func (i *DB) memtableFlushLoop(memtableUpdateStream *chan bool, waitGroup *sync.
 		}
 
 		newSSTableId := i.manifest.GetNextSSTableID()
-		WriteSSTable(sortedRows.list, 1, 10*1000, i.option.path, 0, uint64(newSSTableId))
+		WriteSSTable(sortedRows.list, 1, 10*1000, i.option.path, 0, uint64(newSSTableId), i.option.compression)
 
 		// commit changes to manifest
 		i.manifest.AddTable(&SSTableReferance{

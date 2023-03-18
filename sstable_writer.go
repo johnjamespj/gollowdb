@@ -30,7 +30,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/golang/snappy"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
@@ -80,7 +79,7 @@ func (i SSTableMetadata) PackSSTableMetadata(writer io.Writer) {
 	encoder.EncodeBytes(i.filter.byteArray)
 }
 
-func WriteSSTable(sorted []*TableRow, minBlockCount uint64, maxBlockSize uint64, path string, level uint64, id uint64) error {
+func WriteSSTable(sorted []*TableRow, minBlockCount uint64, maxBlockSize uint64, path string, level uint64, id uint64, compression Compression) error {
 	// extract the datapoints for the index
 	metadata := extractMetadata(sorted, minBlockCount, maxBlockSize)
 	blocks := extractBlocks(sorted, metadata.blockCount, metadata.blockSize)
@@ -92,7 +91,7 @@ func WriteSSTable(sorted []*TableRow, minBlockCount uint64, maxBlockSize uint64,
 	}
 
 	buf := bufio.NewWriter(fd)
-	blockBuf, idx := packBlocks(blocks)
+	blockBuf, idx := packBlocks(blocks, compression)
 	metadata.index = idx
 	metadata.size = uint64(len(blockBuf))
 	metadata.filter = buildFilter(sorted, metadata.count)
@@ -198,7 +197,7 @@ func extractBlocks(itr []*TableRow, blockCount uint64, blockSize uint64) [][]*Ta
 	return blocks
 }
 
-func packBlocks(blocks [][]*TableRow) ([]byte, []*IndexRow) {
+func packBlocks(blocks [][]*TableRow, compression Compression) ([]byte, []*IndexRow) {
 	idx := make([]*IndexRow, len(blocks))
 
 	bufTotal := bytes.NewBuffer([]byte{})
@@ -211,7 +210,7 @@ func packBlocks(blocks [][]*TableRow) ([]byte, []*IndexRow) {
 			key:    blocks[j][0].key,
 			offset: bufTotal.Len(),
 		}
-		bufTotal.Write(snappy.Encode([]byte{}, buf.Bytes()))
+		bufTotal.Write(compression.Encode(buf.Bytes()))
 	}
 
 	return bufTotal.Bytes(), idx

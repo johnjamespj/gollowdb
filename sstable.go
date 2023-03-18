@@ -30,7 +30,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/golang/snappy"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
@@ -44,9 +43,10 @@ type SSTableReader struct {
 	blocksOffset uint64
 	index        *SortedList[*IndexRow]
 	comparator   Comparator[*DataSlice]
+	compression  Compression
 }
 
-func NewSSTableReader(path string, level uint64, id uint64, comparator Comparator[*DataSlice]) (SSTableReader, error) {
+func NewSSTableReader(path string, level uint64, id uint64, compression Compression, comparator Comparator[*DataSlice]) (SSTableReader, error) {
 	fd, err := os.OpenFile(filepath.Join(path, fmt.Sprintf("l%d_%d.sst", level, id)), os.O_RDWR, 0644)
 	if err != nil {
 		return SSTableReader{}, err
@@ -77,6 +77,7 @@ func NewSSTableReader(path string, level uint64, id uint64, comparator Comparato
 		blocksOffset: uint64(offset),
 		comparator:   comparator,
 		index:        index,
+		compression:  compression,
 	}
 	reader.base = &reader
 
@@ -407,7 +408,7 @@ func (i *SSTableReader) GetBlock(idx int) (*SortedList[*TableRow], error) {
 		return &SortedList[*TableRow]{}, err
 	}
 
-	r, err := snappy.Decode([]byte{}, blockBytes)
+	r, err := i.compression.Decode(blockBytes)
 	if err != nil {
 		return &SortedList[*TableRow]{}, err
 	}

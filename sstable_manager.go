@@ -53,6 +53,7 @@ type SSTableManager struct {
 	mu              sync.RWMutex
 	lsm             []*LSMLevel
 	lsmUpdateStream *chan bool
+	options         *DBOption
 }
 
 func NewSSTableManager(options *DBOption, snapshotsHolds *SortedList[int], manifest *Manifest, rowComparator Comparator[*TableRow], wg *sync.WaitGroup, log *log.Logger) *SSTableManager {
@@ -71,6 +72,7 @@ func NewSSTableManager(options *DBOption, snapshotsHolds *SortedList[int], manif
 		path:            options.path,
 		lsm:             make([]*LSMLevel, 0),
 		lsmUpdateStream: &lsmUpdateStream,
+		options:         options,
 	}
 	manager.compactor = NewCompactor(options, snapshotsHolds, &lsmUpdateStream, manager, manifest, rowComparator, wg, log)
 
@@ -99,7 +101,7 @@ func (i *SSTableManager) AddAllSSTables(refs []*SSTableReferance) {
 	defer i.mu.Unlock()
 
 	for _, elm := range refs {
-		sstable, err := NewSSTableReader(i.path, uint64(elm.level), uint64(elm.id), i.comparator)
+		sstable, err := NewSSTableReader(i.path, uint64(elm.level), uint64(elm.id), i.options.compression, i.comparator)
 		if err != nil {
 			panic(err)
 		}
