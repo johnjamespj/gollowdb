@@ -37,7 +37,7 @@ type DBOption struct {
 	maxInmemoryWriteBuffer int
 	comparatorName         string
 	comparator             Comparator[*DataSlice]
-	merger                 Merger
+	compression            Compression
 }
 
 func NewDBOption() *DBOption {
@@ -55,7 +55,7 @@ func NewDBOption() *DBOption {
 			levelFactor:           2,
 			sstableFileSize:       20 * 1000 * 1000,
 		},
-		merger: &DefaultMerger{},
+		compression: &ZlibCompression{},
 	}
 }
 
@@ -82,6 +82,10 @@ func (i *DBOption) SetComparator(name string, comparator Comparator[*DataSlice])
 
 func (i *DBOption) SetLSMOptions(options LSMOptions) {
 	i.lsmOptions = options
+}
+
+func (i *DBOption) SetCompression(compression Compression) {
+	i.compression = compression
 }
 
 type LSMOptions struct {

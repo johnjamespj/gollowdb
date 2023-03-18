@@ -45,10 +45,12 @@ type Compactor struct {
 
 	levelZeroStream  *chan bool
 	compactionStream *chan bool
-	merger           Merger
+	snapshotsHolds   *SortedList[int]
+
+	options *DBOption
 }
 
-func NewCompactor(options *DBOption, lsmUpdateStream *chan bool, sstableManager *SSTableManager, manifest *Manifest, comparator Comparator[*TableRow], wg *sync.WaitGroup, log *log.Logger) *Compactor {
+func NewCompactor(options *DBOption, snapshotsHolds *SortedList[int], lsmUpdateStream *chan bool, sstableManager *SSTableManager, manifest *Manifest, comparator Comparator[*TableRow], wg *sync.WaitGroup, log *log.Logger) *Compactor {
 	cmp := func(a *LSMLevel, b *LSMLevel) int {
 		return int((a.score - b.score) * 1000)
 	}
@@ -71,7 +73,8 @@ func NewCompactor(options *DBOption, lsmUpdateStream *chan bool, sstableManager 
 		wg:               wg,
 		compactionStream: &compactionStream,
 		levelZeroStream:  &levelZeroStream,
-		merger:           options.merger,
+		snapshotsHolds:   snapshotsHolds,
+		options:          options,
 	}
 
 	go func() {
@@ -325,7 +328,7 @@ func (i *Compactor) SSTableLoader(tables []*SSTableReaderRef) []*TableRow {
 			acc = append(acc, row)
 		} else {
 			if len(acc) > 1 {
-				acc = i.merger.MergeRows(acc)
+				acc = MergeRows(acc, i.snapshotsHolds)
 			}
 
 			newList = append(newList, acc...)
@@ -386,7 +389,7 @@ func (i *Compactor) SplitAndSave(sorted []*TableRow, partitionSize int, writeLev
 			wg.Add(1)
 			id := i.manifest.GetNextSSTableID()
 			go func(a []*TableRow, id int64) {
-				WriteSSTable(a, 1, 10*1000, i.sstableManager.path, uint64(writeLevel), uint64(id))
+				WriteSSTable(a, 1, 10*1000, i.sstableManager.path, uint64(writeLevel), uint64(id), i.options.compression)
 				wg.Done()
 			}(sorted[lastIdx:j], id)
 			ids = append(ids, &SSTableReferance{
@@ -406,7 +409,7 @@ func (i *Compactor) SplitAndSave(sorted []*TableRow, partitionSize int, writeLev
 		wg.Add(1)
 		id := i.manifest.GetNextSSTableID()
 		go func(a []*TableRow, id int64) {
-			WriteSSTable(a, 1, 10*1000, i.sstableManager.path, uint64(writeLevel), uint64(id))
+			WriteSSTable(a, 1, 10*1000, i.sstableManager.path, uint64(writeLevel), uint64(id), i.options.compression)
 			wg.Done()
 		}(sorted[lastIdx:], id)
 		ids = append(ids, &SSTableReferance{
@@ -456,7 +459,7 @@ func (i *LeveledCompaction) CalculateDelta(lsm []*LSMLevel, level int) int {
 }
 
 func (i *LeveledCompaction) PartitionSize(lsm []*LSMLevel, level int) int {
-	return i.options.sstableFileSize
+	return i.options.sstableFileSize * int(math.Pow(float64(i.options.levelFactor), float64(level)))
 }
 
 func (i *LeveledCompaction) CalculateLevelTargetSize(level int) int {
@@ -466,17 +469,39 @@ func (i *LeveledCompaction) CalculateLevelTargetSize(level int) int {
 	return i.options.maxBaseLevelSize * int(math.Pow(float64(i.options.levelFactor), float64(level-1)))
 }
 
-type Merger interface {
-	MergeRows(rows []*TableRow) []*TableRow
-}
+func MergeRows(rows []*TableRow, snapshot *SortedList[int]) []*TableRow {
+	if snapshot.GetSize() == 0 {
+		// remove all if the last row is DELETE
+		if rows[len(rows)-1].rowType == DELETE {
+			return []*TableRow{}
+		}
 
-type DefaultMerger struct{}
+		return []*TableRow{rows[len(rows)-1]}
+	} else {
+		newRows := make([]*TableRow, 0)
 
-func (i *DefaultMerger) MergeRows(rows []*TableRow) []*TableRow {
-	// remove all if the last row is DELETE
-	if rows[len(rows)-1].rowType == DELETE {
-		return []*TableRow{}
+		itr := snapshot.GetIterator()
+		for itr.MoveNext() {
+			// Get the snapshot
+			val := itr.GetCurrent()
+
+			i := sort.Search(len(rows), func(i int) bool {
+				return int(rows[i].GetSnapshotId()) >= val
+			})
+
+			if i <= len(rows) && i > 0 {
+				row := rows[i-1]
+				if row.GetRowType() == ADD {
+					newRows = append(newRows, rows[i-1])
+				}
+			}
+		}
+
+		if newRows[len(newRows)-1].GetSnapshotId() != rows[len(rows)-1].GetSnapshotId() &&
+			rows[len(rows)-1].GetRowType() == ADD {
+			newRows = append(newRows, rows[len(rows)-1])
+		}
+
+		return newRows
 	}
-
-	return []*TableRow{rows[len(rows)-1]}
 }

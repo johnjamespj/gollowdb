@@ -53,9 +53,10 @@ type SSTableManager struct {
 	mu              sync.RWMutex
 	lsm             []*LSMLevel
 	lsmUpdateStream *chan bool
+	options         *DBOption
 }
 
-func NewSSTableManager(options *DBOption, manifest *Manifest, rowComparator Comparator[*TableRow], wg *sync.WaitGroup, log *log.Logger) *SSTableManager {
+func NewSSTableManager(options *DBOption, snapshotsHolds *SortedList[int], manifest *Manifest, rowComparator Comparator[*TableRow], wg *sync.WaitGroup, log *log.Logger) *SSTableManager {
 	cmp := func(a *SSTableReaderRef, b *SSTableReaderRef) int {
 		c := a.level - b.level
 		if c == 0 {
@@ -71,8 +72,9 @@ func NewSSTableManager(options *DBOption, manifest *Manifest, rowComparator Comp
 		path:            options.path,
 		lsm:             make([]*LSMLevel, 0),
 		lsmUpdateStream: &lsmUpdateStream,
+		options:         options,
 	}
-	manager.compactor = NewCompactor(options, &lsmUpdateStream, manager, manifest, rowComparator, wg, log)
+	manager.compactor = NewCompactor(options, snapshotsHolds, &lsmUpdateStream, manager, manifest, rowComparator, wg, log)
 
 	return manager
 }
@@ -99,7 +101,7 @@ func (i *SSTableManager) AddAllSSTables(refs []*SSTableReferance) {
 	defer i.mu.Unlock()
 
 	for _, elm := range refs {
-		sstable, err := NewSSTableReader(i.path, uint64(elm.level), uint64(elm.id), i.comparator)
+		sstable, err := NewSSTableReader(i.path, uint64(elm.level), uint64(elm.id), i.options.compression, i.comparator)
 		if err != nil {
 			panic(err)
 		}
@@ -161,16 +163,20 @@ func (i *SSTableManager) RemoveAllSSTable(refs []*SSTableReferance) {
 	i.DeleteSSTablesByIds(refs)
 }
 
-func (i *SSTableManager) PlanSSTableQueryStrategy(key *DataSlice, ln int) []*SSTableReader {
+func (i *SSTableManager) PlanSSTableQueryStrategy(key *DataSlice, ln int, across int) []*SSTableReader {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 
 	files := i.GetFilesFromLayer(ln)
 	readers := make([]*SSTableReader, 0)
 
+	j := across
 	for _, curr := range files {
 		if i.comparator(curr.minKey, key) <= 0 && i.comparator(curr.maxKey, key) >= 0 {
 			readers = append(readers, curr.reader)
+		} else if j > 0 && i.comparator(curr.maxKey, key) > 0 {
+			readers = append(readers, curr.reader)
+			j--
 		}
 	}
 

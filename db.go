@@ -48,6 +48,7 @@ type DB struct {
 	sstableUpdateStream  *chan []SSTableUpdate
 	mu                   sync.RWMutex
 	waitGroup            sync.WaitGroup
+	snapshotsHolds       *SortedList[int]
 }
 
 func NewDB(option *DBOption) *DB {
@@ -94,6 +95,7 @@ func NewDB(option *DBOption) *DB {
 		currentWALID:         currentWALID,
 		currentMemtable:      memtable,
 		memtableUpdateStream: &memtableUpdateStream,
+		snapshotsHolds:       NewSortedList(make([]int, 0), func(a int, b int) int { return a - b }),
 	}
 
 	option.id = &manifest.id
@@ -108,7 +110,7 @@ func NewDB(option *DBOption) *DB {
 		db.logger = log.New(file, fmt.Sprintf("[%s] ", *option.id), log.LstdFlags)
 	}
 
-	db.sstableManager = NewSSTableManager(option, manifest, cmp, &db.waitGroup, db.logger)
+	db.sstableManager = NewSSTableManager(option, db.snapshotsHolds, manifest, cmp, &db.waitGroup, db.logger)
 	db.sstableManager.AddAllSSTables(manifest.GetAllTables())
 	db.manifest.sstableManager = db.sstableManager
 
@@ -233,7 +235,7 @@ func (i *DB) Get(key any) *DataSlice {
 	// Look in sstable files
 	keySlice := NewDataSlice(key)
 	for j := 0; j < i.sstableManager.LayerCount(); j++ {
-		tables := i.sstableManager.PlanSSTableQueryStrategy(keySlice, j)
+		tables := i.sstableManager.PlanSSTableQueryStrategy(keySlice, j, 0)
 
 		rows := make([]*TableRow, 0)
 		for _, table := range tables {
@@ -252,6 +254,96 @@ func (i *DB) Get(key any) *DataSlice {
 	}
 
 	return nil
+}
+
+func (i *DB) LockSnapshot() int {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	snapshot := int(i.currentMemtable.snapshotIdCounter)
+	i.snapshotsHolds.Add(snapshot)
+
+	return snapshot
+}
+
+func (i *DB) ReleaseSnapshot(snapshot int) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	i.snapshotsHolds.Remove(snapshot)
+}
+
+func (i *DB) Tail(key any) *DBIterator {
+	return NewDBIterator(i, NewDataSlice(key), nil)
+}
+
+func (i *DB) Sub(key any, endKey any) *DBIterator {
+	return NewDBIterator(i, NewDataSlice(key), NewDataSlice(endKey))
+}
+
+func (i *DB) Head(key any) *DBIterator {
+	return NewDBIterator(i, i.FirstRow().key, NewDataSlice(key))
+}
+
+func (i *DB) FirstRow() *TableRow {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	i.sstableManager.mu.RLock()
+	defer i.sstableManager.mu.RUnlock()
+
+	list := NewSortedList(make([]*TableRow, 0), func(a, b *TableRow) int {
+		c := i.option.comparator(a.key, b.key)
+		if c == 0 {
+			return int(b.snapshotId) - int(a.snapshotId)
+		}
+
+		return c
+	})
+
+	list.AddAll(i.currentMemtable.table.Get(*i.currentMemtable.table.First()).ToList())
+	for _, table := range i.immutablesMemtable {
+		list.AddAll((*table).Get(*i.currentMemtable.table.First()).ToList())
+	}
+
+	for j := 0; j < i.sstableManager.LayerCount(); j++ {
+		tables := i.sstableManager.GetFilesFromLayer(j)
+
+		for _, table := range tables {
+			list.AddAll(table.reader.Get(*i.currentMemtable.table.First()).ToList())
+		}
+	}
+
+	return *list.First()
+}
+
+func (i *DB) LastRow() *TableRow {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	i.sstableManager.mu.RLock()
+	defer i.sstableManager.mu.RUnlock()
+
+	list := NewSortedList(make([]*TableRow, 0), func(a, b *TableRow) int {
+		c := i.option.comparator(a.key, b.key)
+		if c == 0 {
+			return int(a.snapshotId) - int(b.snapshotId)
+		}
+
+		return c
+	})
+
+	list.AddAll(i.currentMemtable.table.Get(*i.currentMemtable.table.Last()).ToList())
+	for _, table := range i.immutablesMemtable {
+		list.AddAll((*table).Get(*i.currentMemtable.table.Last()).ToList())
+	}
+
+	for j := 0; j < i.sstableManager.LayerCount(); j++ {
+		tables := i.sstableManager.GetFilesFromLayer(j)
+
+		for _, table := range tables {
+			list.AddAll(table.reader.Get(*i.currentMemtable.table.Last()).ToList())
+		}
+	}
+
+	return *list.Last()
 }
 
 func (i *DB) Close() {
@@ -300,7 +392,7 @@ func (i *DB) memtableFlushLoop(memtableUpdateStream *chan bool, waitGroup *sync.
 		}
 
 		newSSTableId := i.manifest.GetNextSSTableID()
-		WriteSSTable(sortedRows.list, 1, 10*1000, i.option.path, 0, uint64(newSSTableId))
+		WriteSSTable(sortedRows.list, 1, 10*1000, i.option.path, 0, uint64(newSSTableId), i.option.compression)
 
 		// commit changes to manifest
 		i.manifest.AddTable(&SSTableReferance{
