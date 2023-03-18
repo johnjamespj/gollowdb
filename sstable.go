@@ -123,11 +123,11 @@ func (i *SSTableReader) Last() **TableRow {
 // than or equal to the given key, or null if there is no such key.
 func (i *SSTableReader) Ceiling(k TableRow) *TableRow {
 	// get the block index
-	blockIdxRow := *i.index.Floor(&IndexRow{key: k.key})
+	blockIdxRow := i.index.Floor(&IndexRow{key: k.key})
 	if blockIdxRow == nil {
 		return nil
 	}
-	blockIdx := blockIdxRow.idx
+	blockIdx := (*blockIdxRow).idx
 
 	var block *SortedList[*TableRow]
 	var err error
@@ -154,11 +154,11 @@ func (i *SSTableReader) Ceiling(k TableRow) *TableRow {
 // no such key.
 func (i *SSTableReader) Higher(k TableRow) *TableRow {
 	// get the block index
-	blockIdxRow := *i.index.Floor(&IndexRow{key: k.key})
+	blockIdxRow := i.index.Floor(&IndexRow{key: k.key})
 	if blockIdxRow == nil {
 		return nil
 	}
-	blockIdx := blockIdxRow.idx
+	blockIdx := (*blockIdxRow).idx
 
 	var block *SortedList[*TableRow]
 	var err error
@@ -185,12 +185,12 @@ func (i *SSTableReader) Higher(k TableRow) *TableRow {
 // no such key.
 func (i *SSTableReader) Floor(k TableRow) *TableRow {
 	// get the block index
-	blockIdxRow := *i.index.Floor(&IndexRow{key: k.key})
+	blockIdxRow := i.index.Floor(&IndexRow{key: k.key})
 	if blockIdxRow == nil {
 		return nil
 	}
 
-	blockIdx := blockIdxRow.idx
+	blockIdx := (*blockIdxRow).idx
 
 	block, err := i.GetBlock(blockIdx)
 	if err != nil {
@@ -260,8 +260,14 @@ func (i *SSTableReader) Head(fromKey TableRow, inclusive bool) Iterable[*TableRo
 // greater than or equal to fromKey.
 func (i *SSTableReader) Tail(fromKey TableRow, inclusive bool) Iterable[*TableRow] {
 	// get the block index
-	b := *i.index.Floor(&IndexRow{key: fromKey.key})
-	blockIdx := b.idx
+	b := i.index.Floor(&IndexRow{key: fromKey.key})
+
+	var blockIdx int
+	if b == nil {
+		blockIdx = 0
+	} else {
+		blockIdx = (*b).idx
+	}
 
 	block, err := i.GetBlock(blockIdx)
 	if err != nil {
@@ -561,6 +567,10 @@ type SSTableIterator struct {
 }
 
 func (i *SSTableIterator) MoveNext() bool {
+	if i.currentIterator == nil {
+		return false
+	}
+
 	if !i.currentIterator.MoveNext() {
 		if i.currentBlockIndex+1 < i.sstable.index.GetSize() {
 			i.currentBlockIndex++
@@ -581,6 +591,10 @@ func (i *SSTableIterator) MoveNext() bool {
 }
 
 func (i *SSTableIterator) GetCurrent() *TableRow {
+	if i.currentIterator == nil {
+		panic("Iterator: No more items left")
+	}
+
 	row := i.currentIterator.GetCurrent()
 	if i.stopCallback(&row) {
 		panic("Iterator: No more items left")

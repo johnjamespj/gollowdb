@@ -48,6 +48,7 @@ type DB struct {
 	sstableUpdateStream  *chan []SSTableUpdate
 	mu                   sync.RWMutex
 	waitGroup            sync.WaitGroup
+	snapshotsHolds       *SortedList[int]
 }
 
 func NewDB(option *DBOption) *DB {
@@ -94,6 +95,7 @@ func NewDB(option *DBOption) *DB {
 		currentWALID:         currentWALID,
 		currentMemtable:      memtable,
 		memtableUpdateStream: &memtableUpdateStream,
+		snapshotsHolds:       NewSortedList(make([]int, 0), func(a int, b int) int { return a - b }),
 	}
 
 	option.id = &manifest.id
@@ -108,7 +110,7 @@ func NewDB(option *DBOption) *DB {
 		db.logger = log.New(file, fmt.Sprintf("[%s] ", *option.id), log.LstdFlags)
 	}
 
-	db.sstableManager = NewSSTableManager(option, manifest, cmp, &db.waitGroup, db.logger)
+	db.sstableManager = NewSSTableManager(option, db.snapshotsHolds, manifest, cmp, &db.waitGroup, db.logger)
 	db.sstableManager.AddAllSSTables(manifest.GetAllTables())
 	db.manifest.sstableManager = db.sstableManager
 
@@ -233,7 +235,7 @@ func (i *DB) Get(key any) *DataSlice {
 	// Look in sstable files
 	keySlice := NewDataSlice(key)
 	for j := 0; j < i.sstableManager.LayerCount(); j++ {
-		tables := i.sstableManager.PlanSSTableQueryStrategy(keySlice, j)
+		tables := i.sstableManager.PlanSSTableQueryStrategy(keySlice, j, 0)
 
 		rows := make([]*TableRow, 0)
 		for _, table := range tables {
@@ -252,6 +254,26 @@ func (i *DB) Get(key any) *DataSlice {
 	}
 
 	return nil
+}
+
+func (i *DB) LockSnapshot() int {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	snapshot := int(i.currentMemtable.snapshotIdCounter)
+	i.snapshotsHolds.Add(snapshot)
+
+	return snapshot
+}
+
+func (i *DB) ReleaseSnapshot(snapshot int) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	i.snapshotsHolds.Remove(snapshot)
+}
+
+func (i *DB) Tail(key any) *DBIterator {
+	return NewDBIterator(i, NewDataSlice(key))
 }
 
 func (i *DB) Close() {

@@ -247,17 +247,9 @@ func (v *SortedList[V]) Higher(k V) *V {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
-	i, _ := sort.Find(len(v.list), func(i int) int {
-		return v.comparator(k, v.list[i])
+	i := sort.Search(len(v.list), func(i int) bool {
+		return v.comparator(v.list[i], k) > 0
 	})
-
-	for i+1 < len(v.list) {
-		if v.comparator(v.list[i+1], k) > 0 {
-			i++
-			break
-		}
-		i++
-	}
 
 	if i >= len(v.list) || v.comparator(v.list[i], k) == 0 {
 		return nil
@@ -272,11 +264,11 @@ func (v *SortedList[V]) Tail(fromKey V, inclusive bool) Iterable[V] {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
-	i, _ := sort.Find(len(v.list), func(i int) int {
-		return v.comparator(fromKey, v.list[i])
+	i := sort.Search(len(v.list), func(i int) bool {
+		return v.comparator(v.list[i], fromKey) >= 0
 	})
 
-	for i < len(v.list) && !inclusive {
+	for i < len(v.list)-1 && !inclusive {
 		if v.comparator(v.list[i+1], fromKey) > 0 {
 			i++
 			break
