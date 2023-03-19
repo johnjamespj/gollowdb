@@ -1,8 +1,8 @@
 # Gollowdb
 
-***Warning: Under heavy development***
+***Not maintained***
 
-GollowDB is an experimental key-value store inspired by rocksdb and leveldb. The main objective of the project is to learn how a LSM databases works.
+GollowDB is an ***experimental*** key-value store inspired by rocksdb and leveldb. The main objective of the project is to learn how a LSM databases works.
 
 ## 📣 Public API
 
